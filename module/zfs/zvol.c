@@ -2162,7 +2162,7 @@ zvol_remove_minors_impl(const char *name)
 {
 	zvol_state_t *zv, *zv_next;
 	int namelen = ((name) ? strlen(name) : 0);
-	taskqid_t t, tid = TASKQID_INVALID;
+	taskqid_t t;
 	list_t free_list;
 
 	if (zvol_inhibit_dev)
@@ -2209,8 +2209,6 @@ zvol_remove_minors_impl(const char *name)
 			    TQ_SLEEP);
 			if (t == TASKQID_INVALID)
 				list_insert_head(&free_list, zv);
-			else
-				tid = t;
 		} else {
 			mutex_exit(&zv->zv_state_lock);
 		}
@@ -2222,9 +2220,6 @@ zvol_remove_minors_impl(const char *name)
 		list_remove(&free_list, zv);
 		zvol_free(zv);
 	}
-
-	if (tid != TASKQID_INVALID)
-		taskq_wait_outstanding(system_taskq, tid);
 }
 
 /* Remove minor for this specific volume only */
@@ -2737,6 +2732,14 @@ void
 zvol_fini(void)
 {
 	zvol_remove_minors_impl(NULL);
+
+	/*
+	 * The call to "zvol_remove_minors_impl" may dispatch entries to
+	 * the system_taskq, but it doesn't wait for those entires to
+	 * complete before it returns. Thus, we must wait for all of the
+	 * removals to finish, before we can continue.
+	 */
+	taskq_wait_outstanding(system_taskq, 0);
 
 	blk_unregister_region(MKDEV(zvol_major, 0), 1UL << MINORBITS);
 	unregister_blkdev(zvol_major, ZVOL_DRIVER);
