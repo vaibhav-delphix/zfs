@@ -1008,7 +1008,7 @@ zfs_btree_bulk_finish(zfs_btree_t *tree)
  * Insert value into tree at the location specified by where.
  */
 void
-zfs_btree_insert(zfs_btree_t *tree, const void *value,
+zfs_btree_add_idx(zfs_btree_t *tree, const void *value,
     const zfs_btree_index_t *where)
 {
 	zfs_btree_index_t idx = {0};
@@ -1322,7 +1322,7 @@ zfs_btree_add(zfs_btree_t *tree, const void *node)
 {
 	zfs_btree_index_t where = {0};
 	VERIFY3P(zfs_btree_find(tree, node, &where), ==, NULL);
-	zfs_btree_insert(tree, node, &where);
+	zfs_btree_add_idx(tree, node, &where);
 }
 
 /* Helper function to free a tree node. */
@@ -1593,7 +1593,7 @@ zfs_btree_remove_from_node(zfs_btree_t *tree, zfs_btree_core_t *node,
 
 /* Remove the element at the specific location. */
 void
-zfs_btree_remove_from(zfs_btree_t *tree, zfs_btree_index_t *where)
+zfs_btree_remove_idx(zfs_btree_t *tree, zfs_btree_index_t *where)
 {
 	size_t size = tree->bt_elem_size;
 	zfs_btree_hdr_t *hdr = where->bti_node;
@@ -1840,7 +1840,7 @@ zfs_btree_remove(zfs_btree_t *tree, const void *value)
 {
 	zfs_btree_index_t where = {0};
 	VERIFY3P(zfs_btree_find(tree, value, &where), !=, NULL);
-	zfs_btree_remove_from(tree, &where);
+	zfs_btree_remove_idx(tree, &where);
 }
 
 /* Return the number of elements in the tree. */
