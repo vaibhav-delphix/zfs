@@ -96,7 +96,12 @@ unsigned int zvol_inhibit_dev = 0;
 unsigned int zvol_major = ZVOL_MAJOR;
 unsigned int zvol_threads = 32;
 unsigned int zvol_request_sync = 0;
-unsigned int zvol_sync_by_default = 0;
+/*
+ * Delphix: Make all zvol writes and discards sync unless sync=disabled
+ * is set. This is meant to avoid data corruption when exposing the zvols
+ * over iSCSI and the system reboots unexpectedly.
+ */
+unsigned int zvol_sync_by_default = 1;
 unsigned int zvol_prefetch_bytes = (128 * 1024);
 unsigned long zvol_max_discard_blocks = 16384;
 unsigned int zvol_volmode = ZFS_VOLMODE_GEOM;
