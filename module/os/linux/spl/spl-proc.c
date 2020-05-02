@@ -437,29 +437,11 @@ slab_seq_show(struct seq_file *f, void *p)
 
 	ASSERT(skc->skc_magic == SKC_MAGIC);
 
-	if (skc->skc_flags & KMC_SLAB) {
-		/*
-		 * This cache is backed by a generic Linux kmem cache which
-		 * has its own accounting. For these caches we only track
-		 * the number of active allocated objects that exist within
-		 * the underlying Linux slabs. For the overall statistics of
-		 * the underlying Linux cache please refer to /proc/slabinfo.
-		 */
-		spin_lock(&skc->skc_lock);
-		seq_printf(f, "%-36s  ", skc->skc_name);
-		seq_printf(f, "0x%05lx %9s %9lu %8s %8u  "
-		    "%5s %5s %5s  %5s %5lu %5s  %5s %5s %5s\n",
-		    (long unsigned)skc->skc_flags,
-		    "-",
-		    (long unsigned)(skc->skc_obj_size * skc->skc_obj_alloc),
-		    "-",
-		    (unsigned)skc->skc_obj_size,
-		    "-", "-", "-", "-",
-		    (long unsigned)skc->skc_obj_alloc,
-		    "-", "-", "-", "-");
-		spin_unlock(&skc->skc_lock);
+	/*
+	 * Backed by Linux slab see /proc/slabinfo.
+	 */
+	if (skc->skc_flags & KMC_SLAB)
 		return (0);
-	}
 
 	spin_lock(&skc->skc_lock);
 	seq_printf(f, "%-36s  ", skc->skc_name);
@@ -479,7 +461,9 @@ slab_seq_show(struct seq_file *f, void *p)
 	    (long unsigned)skc->skc_obj_deadlock,
 	    (long unsigned)skc->skc_obj_emergency,
 	    (long unsigned)skc->skc_obj_emergency_max);
+
 	spin_unlock(&skc->skc_lock);
+
 	return (0);
 }
 
