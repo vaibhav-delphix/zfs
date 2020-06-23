@@ -325,8 +325,44 @@ static zthr_t		*arc_reap_zthr;
 static zthr_t		*arc_evict_zthr;
 
 static kmutex_t		arc_evict_lock;
-static kcondvar_t	arc_evict_waiters_cv;
 static boolean_t	arc_evict_needed = B_FALSE;
+
+/*
+ * Count of bytes evicted since boot.
+ */
+static uint64_t arc_evict_count;
+
+/*
+ * List of arc_evict_waiter_t's, representing threads waiting for the
+ * arc_evict_count to reach specific values.
+ */
+static list_t arc_evict_waiters;
+
+/*
+ * When arc_is_overflowing(), arc_get_data_impl() waits for this percent of
+ * the requested amount of data to be evicted.  For example, by default for
+ * every 2KB that's evicted, 1KB of it may be "reused" by a new allocation.
+ * Since this is above 100%, it ensures that progress is made towards getting
+ * arc_size under arc_c.  Since this is finite, it ensures that allocations
+ * can still happen, even during the potentially long time that arc_size is
+ * more than arc_c.
+ */
+int zfs_arc_get_data_eviction_pct = 200;
+
+/*
+ * This is a limit on how many pages the ARC shrinker makes available for
+ * eviction in response to one page allocation attempt.  Note that in
+ * practice, the kernel's shrinker can ask us to evict up to about 4x this
+ * for one allocation attempt.
+ *
+ * The default limit of 10,000 (in practice, 160MB per allocation attempt)
+ * limits the amount of time spent attempting to reclaim ARC memory to around
+ * 100ms second per allocation attempt, even with a small average compressed
+ * block size of ~8KB.
+ *
+ * See also the comment in arc_shrinker_count().
+ */
+int zfs_arc_shrinker_limit = 10000;
 
 /*
  * The number of headers to evict in arc_evict_state_impl() before
@@ -708,7 +744,6 @@ typedef struct arc_stats {
 	kstat_named_t arcstat_l2_hdr_size;
 	kstat_named_t arcstat_memory_throttle_count;
 	kstat_named_t arcstat_memory_direct_count;
-	kstat_named_t arcstat_memory_indirect_count;
 	kstat_named_t arcstat_memory_all_bytes;
 	kstat_named_t arcstat_memory_free_bytes;
 	kstat_named_t arcstat_memory_available_bytes;
@@ -811,7 +846,6 @@ static arc_stats_t arc_stats = {
 	{ "l2_hdr_size",		KSTAT_DATA_UINT64 },
 	{ "memory_throttle_count",	KSTAT_DATA_UINT64 },
 	{ "memory_direct_count",	KSTAT_DATA_UINT64 },
-	{ "memory_indirect_count",	KSTAT_DATA_UINT64 },
 	{ "memory_all_bytes",		KSTAT_DATA_UINT64 },
 	{ "memory_free_bytes",		KSTAT_DATA_UINT64 },
 	{ "memory_available_bytes",	KSTAT_DATA_INT64 },
@@ -899,7 +933,7 @@ static arc_state_t	*arc_l2c_only;
 #define	arc_dnode_size_limit	ARCSTAT(arcstat_dnode_limit)
 #define	arc_meta_min	ARCSTAT(arcstat_meta_min) /* min size for metadata */
 #define	arc_meta_max	ARCSTAT(arcstat_meta_max) /* max size of metadata */
-#define	arc_need_free	ARCSTAT(arcstat_need_free) /* bytes to be freed */
+#define	arc_need_free	ARCSTAT(arcstat_need_free) /* waiting to be evicted */
 #define	arc_sys_free	ARCSTAT(arcstat_sys_free) /* target system free bytes */
 
 /* size of all b_rabd's in entire arc */
@@ -1113,6 +1147,7 @@ static boolean_t arc_is_overflowing(void);
 static void arc_buf_watch(arc_buf_t *);
 static void arc_tuning_update(void);
 static void arc_prune_async(int64_t);
+static void arc_wait_for_eviction(uint64_t);
 
 static arc_buf_contents_t arc_buf_type(arc_buf_hdr_t *);
 static uint32_t arc_bufc_to_flags(arc_buf_contents_t);
@@ -4120,27 +4155,28 @@ arc_evict_state_impl(multilist_t *ml, int idx, arc_buf_hdr_t *marker,
 				evict_count++;
 
 			/*
-			 * If arc_size isn't overflowing, signal any
-			 * threads that might happen to be waiting.
-			 *
-			 * For each header evicted, we wake up a single
-			 * thread. If we used cv_broadcast, we could
-			 * wake up "too many" threads causing arc_size
-			 * to significantly overflow arc_c; since
-			 * arc_get_data_impl() doesn't check for overflow
-			 * when it's woken up (it doesn't because it's
-			 * possible for the ARC to be overflowing while
-			 * full of un-evictable buffers, and the
-			 * function should proceed in this case).
-			 *
-			 * If threads are left sleeping, due to not
-			 * using cv_broadcast here, they will be woken
-			 * up via cv_broadcast in arc_evict_cb() just
-			 * before arc_evict_zthr sleeps.
+			 * Increment the count of evicted bytes, and wake up
+			 * any threads that are waiting for the count to
+			 * reach this value.  Since the list is ordered by
+			 * ascending aew_count, we pop off the beginning of
+			 * the list until we reach the end, or a waiter
+			 * that's past the current "count".
 			 */
 			mutex_enter(&arc_evict_lock);
-			if (!arc_is_overflowing())
-				cv_signal(&arc_evict_waiters_cv);
+			arc_evict_count += evicted;
+			arc_evict_waiter_t *aw;
+			while ((aw = list_head(&arc_evict_waiters)) != NULL &&
+			    aw->aew_count <= arc_evict_count) {
+				list_remove(&arc_evict_waiters, aw);
+				cv_broadcast(&aw->aew_cv);
+			}
+
+			aw = list_tail(&arc_evict_waiters);
+			if (aw == NULL) {
+				arc_need_free = 0;
+			} else {
+				arc_need_free = aw->aew_count - arc_evict_count;
+			}
 			mutex_exit(&arc_evict_lock);
 		} else {
 			ARCSTAT_BUMP(arcstat_mutex_miss);
@@ -4877,31 +4913,6 @@ arc_free_memory(void)
 #endif /* _KERNEL */
 }
 
-typedef enum free_memory_reason_t {
-	FMR_UNKNOWN,
-	FMR_NEEDFREE,
-	FMR_LOTSFREE,
-	FMR_SWAPFS_MINFREE,
-	FMR_PAGES_PP_MAXIMUM,
-	FMR_HEAP_ARENA,
-	FMR_ZIO_ARENA,
-} free_memory_reason_t;
-
-int64_t last_free_memory;
-free_memory_reason_t last_free_reason;
-
-#ifdef _KERNEL
-/*
- * Additional reserve of pages for pp_reserve.
- */
-int64_t arc_pages_pp_reserve = 64;
-
-/*
- * Additional reserve of pages for swapfs.
- */
-int64_t arc_swapfs_reserve = 64;
-#endif /* _KERNEL */
-
 /*
  * Return the amount of memory that can be consumed before reclaim will be
  * needed.  Positive if there is sufficient free memory, negative indicates
@@ -4910,119 +4921,17 @@ int64_t arc_swapfs_reserve = 64;
 static int64_t
 arc_available_memory(void)
 {
-	int64_t lowest = INT64_MAX;
-	free_memory_reason_t r = FMR_UNKNOWN;
 #ifdef _KERNEL
-	int64_t n;
-#ifdef __linux__
-#ifdef freemem
-#undef freemem
-#endif
-	pgcnt_t needfree = btop(arc_need_free);
-	pgcnt_t lotsfree = btop(arc_sys_free);
-	pgcnt_t desfree = 0;
-	pgcnt_t freemem = btop(arc_free_memory());
-#endif
-
-	if (needfree > 0) {
-		n = PAGESIZE * (-needfree);
-		if (n < lowest) {
-			lowest = n;
-			r = FMR_NEEDFREE;
-		}
-	}
-
-	/*
-	 * check that we're out of range of the pageout scanner.  It starts to
-	 * schedule paging if freemem is less than lotsfree and needfree.
-	 * lotsfree is the high-water mark for pageout, and needfree is the
-	 * number of needed free pages.  We add extra pages here to make sure
-	 * the scanner doesn't start up while we're freeing memory.
-	 */
-	n = PAGESIZE * (freemem - lotsfree - needfree - desfree);
-	if (n < lowest) {
-		lowest = n;
-		r = FMR_LOTSFREE;
-	}
-
-#ifndef __linux__
-	/*
-	 * check to make sure that swapfs has enough space so that anon
-	 * reservations can still succeed. anon_resvmem() checks that the
-	 * availrmem is greater than swapfs_minfree, and the number of reserved
-	 * swap pages.  We also add a bit of extra here just to prevent
-	 * circumstances from getting really dire.
-	 */
-	n = PAGESIZE * (availrmem - swapfs_minfree - swapfs_reserve -
-	    desfree - arc_swapfs_reserve);
-	if (n < lowest) {
-		lowest = n;
-		r = FMR_SWAPFS_MINFREE;
-	}
-
-	/*
-	 * Check that we have enough availrmem that memory locking (e.g., via
-	 * mlock(3C) or memcntl(2)) can still succeed.  (pages_pp_maximum
-	 * stores the number of pages that cannot be locked; when availrmem
-	 * drops below pages_pp_maximum, page locking mechanisms such as
-	 * page_pp_lock() will fail.)
-	 */
-	n = PAGESIZE * (availrmem - pages_pp_maximum -
-	    arc_pages_pp_reserve);
-	if (n < lowest) {
-		lowest = n;
-		r = FMR_PAGES_PP_MAXIMUM;
-	}
-#endif
-
-#if defined(_ILP32)
-	/*
-	 * If we're on a 32-bit platform, it's possible that we'll exhaust the
-	 * kernel heap space before we ever run out of available physical
-	 * memory.  Most checks of the size of the heap_area compare against
-	 * tune.t_minarmem, which is the minimum available real memory that we
-	 * can have in the system.  However, this is generally fixed at 25 pages
-	 * which is so low that it's useless.  In this comparison, we seek to
-	 * calculate the total heap-size, and reclaim if more than 3/4ths of the
-	 * heap is allocated.  (Or, in the calculation, if less than 1/4th is
-	 * free)
-	 */
-	n = vmem_size(heap_arena, VMEM_FREE) -
-	    (vmem_size(heap_arena, VMEM_FREE | VMEM_ALLOC) >> 2);
-	if (n < lowest) {
-		lowest = n;
-		r = FMR_HEAP_ARENA;
-	}
-#endif
-
-	/*
-	 * If zio data pages are being allocated out of a separate heap segment,
-	 * then enforce that the size of available vmem for this arena remains
-	 * above about 1/4th (1/(2^arc_zio_arena_free_shift)) free.
-	 *
-	 * Note that reducing the arc_zio_arena_free_shift keeps more virtual
-	 * memory (in the zio_arena) free, which can avoid memory
-	 * fragmentation issues.
-	 */
-	if (zio_arena != NULL) {
-		n = (int64_t)vmem_size(zio_arena, VMEM_FREE) -
-		    (vmem_size(zio_arena, VMEM_ALLOC) >>
-		    arc_zio_arena_free_shift);
-		if (n < lowest) {
-			lowest = n;
-			r = FMR_ZIO_ARENA;
-		}
-	}
+	return (arc_free_memory() - arc_sys_free);
 #else /* _KERNEL */
+	int64_t lowest = INT64_MAX;
+
 	/* Every 100 calls, free a small amount */
 	if (spa_get_random(100) == 0)
 		lowest = -1024;
-#endif /* _KERNEL */
-
-	last_free_memory = lowest;
-	last_free_reason = r;
 
 	return (lowest);
+#endif /* _KERNEL */
 }
 
 /*
@@ -5124,18 +5033,18 @@ arc_evict_cb_check(void *arg, zthr_t *zthr)
 		arc_ksp->ks_update(arc_ksp, KSTAT_READ);
 
 	/*
-	 * We have to rely on arc_get_data_impl() to tell us when to evict,
-	 * rather than checking if we are overflowing here, so that we are
-	 * sure to not leave arc_get_data_impl() waiting on
-	 * arc_evict_waiters_cv.  If we have become "not overflowing" since
-	 * arc_get_data_impl() checked, we need to wake it up.  We could
-	 * broadcast the CV here, but arc_get_data_impl() may have not yet
-	 * gone to sleep.  We would need to use a mutex to ensure that this
-	 * function doesn't broadcast until arc_get_data_impl() has gone to
-	 * sleep (e.g. the arc_evict_lock).  However, the lock ordering of
-	 * such a lock would necessarily be incorrect with respect to the
-	 * zthr_lock, which is held before this function is called, and is
-	 * held by arc_get_data_impl() when it calls zthr_wakeup().
+	 * We have to rely on arc_wait_for_eviction() to tell us when to
+	 * evict, rather than checking if we are overflowing here, so that we
+	 * are sure to not leave arc_wait_for_eviction() waiting on aew_cv.
+	 * If we have become "not overflowing" since arc_wait_for_eviction()
+	 * checked, we need to wake it up.  We could broadcast the CV here,
+	 * but arc_wait_for_eviction() may have not yet gone to sleep.  We
+	 * would need to use a mutex to ensure that this function doesn't
+	 * broadcast until arc_wait_for_eviction() has gone to sleep (e.g.
+	 * the arc_evict_lock).  However, the lock ordering of such a lock
+	 * would necessarily be incorrect with respect to the zthr_lock,
+	 * which is held before this function is called, and is held by
+	 * arc_wait_for_eviction() when it calls zthr_wakeup().
 	 */
 	return (arc_evict_needed);
 }
@@ -5174,8 +5083,10 @@ arc_evict_cb(void *arg, zthr_t *zthr)
 		 * can't evict anything more, so we should wake
 		 * arc_get_data_impl() sooner.
 		 */
-		cv_broadcast(&arc_evict_waiters_cv);
-		arc_need_free = 0;
+		arc_evict_waiter_t *aw;
+		while ((aw = list_remove_head(&arc_evict_waiters)) != NULL) {
+			cv_broadcast(&aw->aew_cv);
+		}
 	}
 	mutex_exit(&arc_evict_lock);
 	spl_fstrans_unmark(cookie);
@@ -5258,9 +5169,6 @@ arc_reap_cb(void *arg, zthr_t *zthr)
 	int64_t to_free =
 	    (arc_c >> arc_shrink_shift) - free_memory;
 	if (to_free > 0) {
-#ifdef _KERNEL
-		to_free = MAX(to_free, arc_need_free);
-#endif
 		arc_reduce_target_size(to_free);
 	}
 	spl_fstrans_unmark(cookie);
@@ -5343,84 +5251,85 @@ arc_evictable_memory(void)
 static unsigned long
 arc_shrinker_count(struct shrinker *shrink, struct shrink_control *sc)
 {
-	return (btop((int64_t)arc_evictable_memory()));
+	/*
+	 * kswapd doesn't know how much we evict, because it's only looking
+	 * for pages to be added to the inactive lists.  This causes it to
+	 * ask us to evict the entire ARC.  Instead, we ignore its requests
+	 * and manage the free memory in arc_reap_cb[_check]().
+	 */
+	if (current_is_kswapd()) {
+		/*
+		 * Wake up the arc_evict_zthr so it can start responding to
+		 * this memory pressure right away, if it isn't already.
+		 */
+		arc_wait_for_eviction(0);
+		return (0);
+	}
+
+	/*
+	 * __GFP_FS won't be set if we are called from ZFS code.  To avoid a
+	 * deadlock, we don't allow evicting in this case.  We return 0
+	 * rather than SHRINK_STOP so that the shrinker logic doesn't
+	 * accumulate a deficit against us.
+	 */
+	if (!(sc->gfp_mask & __GFP_FS)) {
+		return (0);
+	}
+
+	/*
+	 * This code is reached in the "direct reclaim" case, were the kernel
+	 * (outside ZFS) is trying to allocate a page, and the system is low
+	 * on memory.
+	 *
+	 * The kernel's shrinker code doesn't understand how many pages the
+	 * ARC's callback actually frees, so it may ask the ARC to shrink a
+	 * lot for one page allocation. This is problematic because it may
+	 * take a long time, thus delaying the page allocation, and because
+	 * it may force the ARC to unnecessarily shrink very small.
+	 *
+	 * Therefore, we limit the amount of data that we say is evictable,
+	 * which limits the amount that the shrinker will ask us to evict for
+	 * one page allocation attempt.
+	 *
+	 * In practice, we may be asked to shrink 4x the limit to satisfy one
+	 * page allocation, before the kernel's shrinker code gives up on us.
+	 * When that happens, we rely on the kernel code to find the pages
+	 * that we freed before invoking the OOM killer.  This happens in
+	 * __alloc_pages_slowpath(), which retries and finds the pages we
+	 * freed when it calls get_page_from_freelist().
+	 *
+	 * See also the comment above zfs_arc_shrinker_limit.
+	 */
+	return (MIN(zfs_arc_shrinker_limit,
+	    btop((int64_t)arc_evictable_memory())));
 }
 
 static unsigned long
 arc_shrinker_scan(struct shrinker *shrink, struct shrink_control *sc)
 {
-	int64_t pages;
+	ASSERT((sc->gfp_mask & __GFP_FS) != 0);
 
 	/* The arc is considered warm once reclaim has occurred */
 	if (unlikely(arc_warm == B_FALSE))
 		arc_warm = B_TRUE;
 
-	/* Return the potential number of reclaimable pages */
-	pages = btop((int64_t)arc_evictable_memory());
-
-	/* Not allowed to perform filesystem reclaim */
-	if (!(sc->gfp_mask & __GFP_FS))
-		return (SHRINK_STOP);
-
-	/* Reclaim in progress */
-	if (mutex_tryenter(&arc_evict_lock) == 0) {
-		ARCSTAT_INCR(arcstat_need_free, ptob(sc->nr_to_scan));
-		return (0);
-	}
-
-	mutex_exit(&arc_evict_lock);
-
 	/*
-	 * Evict the requested number of pages by shrinking arc_c the
-	 * requested amount.
+	 * Evict the requested number of pages by reducing arc_c and waiting
+	 * for the requested amount of data to be evicted.
 	 */
-	if (pages > 0) {
-		arc_reduce_target_size(ptob(sc->nr_to_scan));
-
-		/*
-		 * Repeated calls to the arc shrinker can reduce arc_c
-		 * drastically, potentially all the way to arc_c_min.  While
-		 * arc_c is below arc_size, ZFS can't process read/write
-		 * requests, because arc_get_data_impl() will block.  To
-		 * ensure that arc_c doesn't shrink faster than the evict
-		 * thread can keep up, we wait for eviction here.
-		 */
-		mutex_enter(&arc_evict_lock);
-		if (arc_is_overflowing()) {
-			arc_evict_needed = B_TRUE;
-			zthr_wakeup(arc_evict_zthr);
-			(void) cv_wait(&arc_evict_waiters_cv,
-			    &arc_evict_lock);
-		}
-		mutex_exit(&arc_evict_lock);
-
-		if (current_is_kswapd())
-			arc_kmem_reap_soon();
-		pages = MAX((int64_t)pages -
-		    (int64_t)btop(arc_evictable_memory()), 0);
-		/*
-		 * We've shrunk what we can, wake up threads.
-		 */
-		cv_broadcast(&arc_evict_waiters_cv);
-	} else
-		pages = SHRINK_STOP;
+	arc_reduce_target_size(ptob(sc->nr_to_scan));
+	arc_wait_for_eviction(ptob(sc->nr_to_scan));
 
 	/*
-	 * When direct reclaim is observed it usually indicates a rapid
-	 * increase in memory pressure.  This occurs because the kswapd
-	 * threads were unable to asynchronously keep enough free memory
-	 * available.  In this case set arc_no_grow to briefly pause arc
+	 * We are experiencing memory pressure which the arc_evict_zthr was
+	 * unable to keep up with. Set arc_no_grow to briefly pause arc
 	 * growth to avoid compounding the memory pressure.
 	 */
-	if (current_is_kswapd()) {
-		ARCSTAT_BUMP(arcstat_memory_indirect_count);
-	} else {
-		arc_no_grow = B_TRUE;
-		arc_kmem_reap_soon();
-		ARCSTAT_BUMP(arcstat_memory_direct_count);
-	}
+	arc_no_grow = B_TRUE;
 
-	return (pages);
+	ARCSTAT_BUMP(arcstat_memory_direct_count);
+
+	return (sc->nr_to_scan);
 }
 
 SPL_SHRINKER_DECLARE(arc_shrinker,
@@ -5555,6 +5464,62 @@ arc_get_data_buf(arc_buf_hdr_t *hdr, uint64_t size, void *tag)
 }
 
 /*
+ * Wait for the specified amount of data (in bytes) to be evicted from the
+ * ARC, or for the ARC to no longer be full.
+ */
+static void
+arc_wait_for_eviction(uint64_t amount)
+{
+	mutex_enter(&arc_evict_lock);
+	if (arc_is_overflowing()) {
+		arc_evict_needed = B_TRUE;
+		zthr_wakeup(arc_evict_zthr);
+
+		if (amount != 0) {
+			arc_evict_waiter_t aw;
+			list_link_init(&aw.aew_node);
+			cv_init(&aw.aew_cv, NULL, CV_DEFAULT, NULL);
+
+			arc_evict_waiter_t *last =
+			    list_tail(&arc_evict_waiters);
+			if (last != NULL) {
+				ASSERT3U(last->aew_count, >, arc_evict_count);
+				aw.aew_count = last->aew_count + amount;
+			} else {
+				aw.aew_count = arc_evict_count + amount;
+			}
+
+			list_insert_tail(&arc_evict_waiters, &aw);
+
+			arc_need_free = aw.aew_count - arc_evict_count;
+
+			DTRACE_PROBE4(arc__wait__for__eviction,
+			    arc_evict_waiter_t *, &aw,
+			    uint64_t, amount,
+			    uint64_t, arc_evict_count,
+			    uint64_t, aw.aew_count);
+
+			/*
+			 * We will be woken up either when arc_evict_count
+			 * reaches aew_count, or when the ARC is no longer
+			 * overflowing and eviction completes.
+			 */
+			cv_wait(&aw.aew_cv, &arc_evict_lock);
+
+			/*
+			 * In case of "false" wakeup, we will still be on the
+			 * list.
+			 */
+			if (list_link_active(&aw.aew_node))
+				list_remove(&arc_evict_waiters, &aw);
+
+			cv_destroy(&aw.aew_cv);
+		}
+	}
+	mutex_exit(&arc_evict_lock);
+}
+
+/*
  * Allocate a block and return it to the caller. If we are hitting the
  * hard limit for the cache size, we must sleep, waiting for the eviction
  * thread to catch up. If we're past the target size but below the hard
@@ -5569,40 +5534,25 @@ arc_get_data_impl(arc_buf_hdr_t *hdr, uint64_t size, void *tag)
 	arc_adapt(size, state);
 
 	/*
-	 * If arc_size is currently overflowing, and has grown past our
-	 * upper limit, we must be adding data faster than the evict
-	 * thread can evict. Thus, to ensure we don't compound the
+	 * If arc_size is currently overflowing, we must be adding data
+	 * faster than we are evicting.  To ensure we don't compound the
 	 * problem by adding more data and forcing arc_size to grow even
-	 * further past it's target size, we halt and wait for the
-	 * eviction thread to catch up.
+	 * further past it's target size, we wait for the eviction thread to
+	 * make some progress.
 	 *
-	 * It's also possible that the reclaim thread is unable to evict
-	 * enough buffers to get arc_size below the overflow limit (e.g.
-	 * due to buffers being un-evictable, or hash lock collisions).
-	 * In this case, we want to proceed regardless if we're
-	 * overflowing; thus we don't use a while loop here.
+	 * Specifically, we wait for zfs_arc_get_data_eviction_pct percent of
+	 * the requested size to be evicted.  This should be more than 100%,
+	 * to ensure that that progress is also made towards getting arc_size
+	 * under arc_c.  See the comment above zfs_arc_get_data_eviction_pct.
+	 *
+	 * We do the overflowing check without holding the arc_evict_lock to
+	 * reduce lock contention in this hot path.  Note that
+	 * arc_wait_for_eviction() will acquire the lock and check again to
+	 * ensure we are truly overflowing before blocking.
 	 */
 	if (arc_is_overflowing()) {
-		mutex_enter(&arc_evict_lock);
-
-		/*
-		 * Now that we've acquired the lock, we may no longer be
-		 * over the overflow limit, lets check.
-		 *
-		 * We're ignoring the case of spurious wake ups. If that
-		 * were to happen, it'd let this thread consume an ARC
-		 * buffer before it should have (i.e. before we're under
-		 * the overflow limit and were signalled by the reclaim
-		 * thread). As long as that is a rare occurrence, it
-		 * shouldn't cause any harm.
-		 */
-		if (arc_is_overflowing()) {
-			arc_evict_needed = B_TRUE;
-			zthr_wakeup(arc_evict_zthr);
-			(void) cv_wait(&arc_evict_waiters_cv,
-			    &arc_evict_lock);
-		}
-		mutex_exit(&arc_evict_lock);
+		arc_wait_for_eviction(size *
+		    zfs_arc_get_data_eviction_pct / 100);
 	}
 
 	VERIFY3U(hdr->b_type, ==, type);
@@ -7829,7 +7779,8 @@ arc_init(void)
 {
 	uint64_t percent, allmem = arc_all_memory();
 	mutex_init(&arc_evict_lock, NULL, MUTEX_DEFAULT, NULL);
-	cv_init(&arc_evict_waiters_cv, NULL, CV_DEFAULT, NULL);
+	list_create(&arc_evict_waiters, sizeof (arc_evict_waiter_t),
+	    offsetof(arc_evict_waiter_t, aew_node));
 
 	arc_min_prefetch_ms = 1000;
 	arc_min_prescient_prefetch_ms = 6000;
@@ -7842,9 +7793,13 @@ arc_init(void)
 	 */
 	spl_register_shrinker(&arc_shrinker);
 
-	/* Set to 1/64 of all memory or a minimum of 512K */
-	arc_sys_free = MAX(allmem / 64, (512 * 1024));
-	arc_need_free = 0;
+	/*
+	 * The ARC tries to keep at least this much memory available for the
+	 * system.  This gives the ARC time to shrink in response to memory
+	 * pressure, before running completely out of memory and invoking the
+	 * direct-reclaim ARC shrinker.
+	 */
+	arc_sys_free = allmem / 32;
 #endif
 
 	/* Set min cache to 1/32 of all memory, or 32MB, whichever is more */
@@ -7983,7 +7938,7 @@ arc_fini(void)
 	(void) zthr_cancel(arc_reap_zthr);
 
 	mutex_destroy(&arc_evict_lock);
-	cv_destroy(&arc_evict_waiters_cv);
+	list_destroy(&arc_evict_waiters);
 
 	/*
 	 * buf_fini() must proceed arc_state_fini() because buf_fin() may
@@ -9517,4 +9472,10 @@ ZFS_MODULE_PARAM(zfs_arc, zfs_arc_, dnode_limit_percent, ULONG, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_arc, zfs_arc_, dnode_reduce_percent, ULONG, ZMOD_RW,
 	"Percentage of excess dnodes to try to unpin");
+
+ZFS_MODULE_PARAM(zfs_arc, zfs_arc_, get_data_eviction_pct, INT, ZMOD_RW,
+	"When full, ARC allocation waits for eviction of this % of alloc size");
+
+ZFS_MODULE_PARAM(zfs_arc, zfs_arc_, shrinker_limit, INT, ZMOD_RW,
+	"Limit on number of pages that ARC shrinker can reclaim at once");
 /* END CSTYLED */
