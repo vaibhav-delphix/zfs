@@ -2317,8 +2317,8 @@ dsl_dir_activity_in_progress(dsl_dir_t *dd, dsl_dataset_t *ds,
 		}
 
 		uint64_t readonly = B_FALSE;
-		error = zfs_get_temporary_prop(ds, ZFS_PROP_READONLY, &readonly,
-		    NULL);
+		error = dsl_prop_get_int_ds(ds,
+		    zfs_prop_to_name(ZFS_PROP_READONLY), &readonly);
 
 		if (error != 0)
 			break;
