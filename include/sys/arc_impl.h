@@ -278,6 +278,13 @@ struct arc_buf_hdr {
 	 */
 	arc_buf_hdr_crypt_t b_crypt_hdr;
 };
+
+typedef struct arc_evict_waiter {
+	list_node_t aew_node;
+	kcondvar_t aew_cv;
+	uint64_t aew_count;
+} arc_evict_waiter_t;
+
 #ifdef __cplusplus
 }
 #endif
