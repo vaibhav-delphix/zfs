@@ -93,6 +93,46 @@ function is_linux
 	fi
 }
 
+# Determine if this is an illumos test system
+#
+# Return 0 if platform illumos, 1 if otherwise
+function is_illumos
+{
+	if [[ $(uname -o) == "illumos" ]]; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+# Determine if this is a FreeBSD test system
+#
+# Return 0 if platform FreeBSD, 1 if otherwise
+
+function is_freebsd
+{
+	if [[ $(uname -o) == "FreeBSD" ]]; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+# Determine if this is a DilOS test system
+#
+# Return 0 if platform DilOS, 1 if otherwise
+
+function is_dilos
+{
+	typeset ID=""
+	[[ -f /etc/os-release ]] && . /etc/os-release
+	if [[ $ID == "dilos" ]]; then
+		return 0
+	else
+		return 1
+	fi
+}
+
 # Determine if this is a 32-bit system
 #
 # Return 0 if platform is 32-bit, 1 if otherwise
@@ -880,13 +920,14 @@ function set_partition
 	typeset -i slicenum=$1
 	typeset start=$2
 	typeset size=$3
-	typeset disk=$4
-
-	if is_linux; then
+	typeset disk=${4#$DEV_DSKDIR/}
+	disk=${disk#$DEV_RDSKDIR/}
+	case "$(uname)" in
+	Linux)
 		if [[ -z $size || -z $disk ]]; then
 			log_fail "The size or disk name is unspecified."
 		fi
-		[[ -n $DEV_DSKDIR ]] && disk=$DEV_DSKDIR/$disk
+		disk=$DEV_DSKDIR/$disk
 		typeset size_mb=${size%%[mMgG]}
 
 		size_mb=${size_mb%%[mMgG][bB]}
@@ -929,7 +970,36 @@ function set_partition
 
 		blockdev --rereadpt $disk 2>/dev/null
 		block_device_wait $disk
-	else
+		;;
+	FreeBSD)
+		if [[ -z $size || -z $disk ]]; then
+			log_fail "The size or disk name is unspecified."
+		fi
+		disk=$DEV_DSKDIR/$disk
+
+		if [[ $slicenum -eq 0 ]] || ! gpart show $disk >/dev/null 2>&1; then
+			gpart destroy -F $disk >/dev/null 2>&1
+			gpart create -s GPT $disk
+			if [[ $? -ne 0 ]]; then
+				log_note "Failed to create GPT partition table on $disk"
+				return 1
+			fi
+		fi
+
+		typeset index=$((slicenum + 1))
+
+		if [[ -n $start ]]; then
+			start="-b $start"
+		fi
+		gpart add -t freebsd-zfs $start -s $size -i $index $disk
+		if [[ $ret_val -ne 0 ]]; then
+			log_note "Failed to create partition $slicenum on $disk"
+			return 1
+		fi
+
+		block_device_wait $disk
+		;;
+	*)
 		if [[ -z $slicenum || -z $size || -z $disk ]]; then
 			log_fail "The slice, size or disk name is unspecified."
 		fi
@@ -950,7 +1020,8 @@ function set_partition
 		format -e -s -d $disk -f $format_file
 		typeset ret_val=$?
 		rm -f $format_file
-	fi
+		;;
+	esac
 
 	if [[ $ret_val -ne 0 ]]; then
 		log_note "Unable to format $disk slice $slicenum to $size"

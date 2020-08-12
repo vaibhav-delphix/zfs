@@ -25,7 +25,7 @@
 #
 
 . $STF_SUITE/include/libtest.shlib
-. $STF_SUITE/tests/functional/cli_root/zpool_create/zpool_create.shlib
+. $STF_SUITE/tests/functional/cli_root/zpool_add/zpool_add.kshlib
 
 #
 # DESCRIPTION:
@@ -43,14 +43,14 @@ verify_runnable "global"
 function cleanup
 {
 	poolexists $TESTPOOL && destroy_pool $TESTPOOL
-	log_must rm -f $disk1 $disk2
+	rm -f $disk1 $disk2
 }
 
 log_assert "zpool add -o ashift=<n>' works with different ashift values"
 log_onexit cleanup
 
-disk1=$TEST_BASE_DIR/$FILEDISK0
-disk2=$TEST_BASE_DIR/$FILEDISK1
+disk1=$TEST_BASE_DIR/disk1
+disk2=$TEST_BASE_DIR/disk2
 log_must mkfile $SIZE $disk1
 log_must mkfile $SIZE $disk2
 
@@ -75,7 +75,7 @@ typeset badvals=("off" "on" "1" "8" "17" "1b" "ff" "-")
 for badval in ${badvals[@]}
 do
 	log_must zpool create $TESTPOOL $disk1
-	log_mustnot zpool add $TESTPOOL -o ashift="$badval" $disk2
+	log_mustnot zpool add -o ashift="$badval" $TESTPOOL $disk2
 	# clean things for the next run
 	log_must zpool destroy $TESTPOOL
 	log_must zpool labelclear $disk1

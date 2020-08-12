@@ -56,14 +56,6 @@ function cleanup
 	fi
 }
 
-if [[ -n $DISK ]]; then
-        disk=$DISK
-else
-        disk=$DISK0
-fi
-
-typeset pool_dev=${disk}${SLICE_PREFIX}${SLICE0}
-
 log_assert "'zpool create' should fail with mountpoint exists and not empty."
 log_onexit cleanup
 
@@ -81,7 +73,7 @@ while (( i < 2 )); do
 		log_must touch $TESTDIR/testfile
 	fi
 
-	log_mustnot zpool create -m $TESTDIR -f $TESTPOOL $pool_dev
+	log_mustnot zpool create -m $TESTDIR -f $TESTPOOL $DISK0
 	log_mustnot poolexists $TESTPOOL
 
 	(( i = i + 1 ))

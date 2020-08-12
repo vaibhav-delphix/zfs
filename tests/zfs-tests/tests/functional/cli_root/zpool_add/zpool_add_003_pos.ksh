@@ -63,12 +63,12 @@ log_onexit cleanup
 
 tmpfile="$TEST_BASE_DIR/zpool_add_003.tmp$$"
 
-create_pool "$TESTPOOL" "${disk}${SLICE_PREFIX}${SLICE0}"
+create_pool "$TESTPOOL" "$DISK0"
 log_must poolexists "$TESTPOOL"
 
-zpool add -n "$TESTPOOL" ${disk}${SLICE_PREFIX}${SLICE1} > $tmpfile
+zpool add -n "$TESTPOOL" $DISK1 > $tmpfile
 
-log_mustnot vdevs_in_pool "$TESTPOOL" "${disk}${SLICE_PREFIX}${SLICE1}"
+log_mustnot vdevs_in_pool "$TESTPOOL" "$DISK1"
 
 str="would update '$TESTPOOL' to the following configuration:"
 cat $tmpfile | grep "$str" >/dev/null 2>&1

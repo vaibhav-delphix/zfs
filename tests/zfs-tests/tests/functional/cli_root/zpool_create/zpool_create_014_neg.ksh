@@ -62,25 +62,18 @@ function cleanup
 log_assert "'zpool create' should fail with regular file in swap."
 log_onexit cleanup
 
-if [[ -n $DISK ]]; then
-        disk=$DISK
-else
-        disk=$DISK0
-fi
-
 if is_linux; then
 	set -A options "" "-f"
 else
 	set -A options "-n" "" "-f"
 fi
 
-typeset pool_dev=${disk}${SLICE_PREFIX}${SLICE0}
 typeset vol_name=$TESTPOOL/$TESTVOL
 typeset mntp=/mnt
 typeset TMP_FILE=$mntp/tmpfile.$$
 
-create_pool $TESTPOOL $pool_dev
-log_must zfs create -V 75m $vol_name
+create_pool $TESTPOOL $DISK0
+log_must zfs create -V 100m $vol_name
 block_device_wait
 log_must echo "y" | newfs ${ZVOL_DEVDIR}/$vol_name > /dev/null 2>&1
 log_must mount ${ZVOL_DEVDIR}/$vol_name $mntp

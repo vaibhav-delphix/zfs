@@ -393,7 +393,7 @@ get_usage(zfs_help_t idx)
 		return (gettext("\tversion\n"));
 	case HELP_REDACT:
 		return (gettext("\tredact <snapshot> <bookmark> "
-		    "<redaction_snapshot> ..."));
+		    "<redaction_snapshot> ...\n"));
 	case HELP_WAIT:
 		return (gettext("\twait [-t <activity>] <filesystem>\n"));
 	}

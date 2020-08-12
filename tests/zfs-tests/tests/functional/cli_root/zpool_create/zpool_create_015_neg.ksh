@@ -63,13 +63,6 @@ function cleanup
 }
 
 unset NOINUSE_CHECK
-if [[ -n $DISK ]]; then
-        disk=$DISK
-else
-        disk=$DISK0
-fi
-
-typeset pool_dev=${disk}${SLICE_PREFIX}${SLICE0}
 typeset vol_name=$TESTPOOL/$TESTVOL
 
 log_assert "'zpool create' should fail with zfs vol device in swap."
@@ -78,8 +71,8 @@ log_onexit cleanup
 #
 # use zfs vol device in swap to create pool which should fail.
 #
-create_pool $TESTPOOL $pool_dev
-log_must zfs create -V 75m $vol_name
+create_pool $TESTPOOL $DISK0
+log_must zfs create -V 100m $vol_name
 block_device_wait
 swap_setup ${ZVOL_DEVDIR}/$vol_name
 
