@@ -22,8 +22,9 @@
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2011, 2018 by Delphix. All rights reserved.
  * Copyright 2016 Gary Mills
- * Copyright (c) 2017 Datto Inc.
- * Copyright 2017 Joyent, Inc.
+ * Copyright (c) 2017, 2019, Datto Inc. All rights reserved.
+ * Copyright (c) 2015, Nexenta Systems, Inc. All rights reserved.
+ * Copyright 2019 Joyent, Inc.
  */
 
 #include <sys/dsl_scan.h>
@@ -360,7 +361,7 @@ scan_init(void)
 	for (int i = 0; i < SPA_DVAS_PER_BP; i++) {
 		char name[36];
 
-		(void) sprintf(name, "sio_cache_%d", i);
+		(void) snprintf(name, sizeof (name), "sio_cache_%d", i);
 		sio_cache[i] = kmem_cache_create(name,
 		    (sizeof (scan_io_t) + ((i + 1) * sizeof (dva_t))),
 		    0, NULL, NULL, NULL, NULL, NULL, 0);
@@ -542,6 +543,22 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 			zfs_dbgmsg("new-style scrub was modified "
 			    "by old software; restarting in txg %llu",
 			    (longlong_t)scn->scn_restart_txg);
+		} else if (dsl_scan_resilvering(dp)) {
+			/*
+			 * If a resilver is in progress and there are already
+			 * errors, restart it instead of finishing this scan and
+			 * then restarting it. If there haven't been any errors
+			 * then remember that the incore DTL is valid.
+			 */
+			if (scn->scn_phys.scn_errors > 0) {
+				scn->scn_restart_txg = txg;
+				zfs_dbgmsg("resilver can't excise DTL_MISSING "
+				    "when finished; restarting in txg %llu",
+				    (u_longlong_t)scn->scn_restart_txg);
+			} else {
+				/* it's safe to excise DTL when finished */
+				spa->spa_scrub_started = B_TRUE;
+			}
 		}
 	}
 
@@ -591,6 +608,13 @@ dsl_scan_restarting(dsl_scan_t *scn, dmu_tx_t *tx)
 {
 	return (scn->scn_restart_txg != 0 &&
 	    scn->scn_restart_txg <= tx->tx_txg);
+}
+
+boolean_t
+dsl_scan_resilver_scheduled(dsl_pool_t *dp)
+{
+	return ((dp->dp_scan && dp->dp_scan->scn_restart_txg != 0) ||
+	    (spa_async_tasks(dp->dp_spa) & SPA_ASYNC_RESILVER));
 }
 
 boolean_t
@@ -681,8 +705,9 @@ static int
 dsl_scan_setup_check(void *arg, dmu_tx_t *tx)
 {
 	dsl_scan_t *scn = dmu_tx_pool(tx)->dp_scan;
+	vdev_t *rvd = scn->scn_dp->dp_spa->spa_root_vdev;
 
-	if (dsl_scan_is_running(scn))
+	if (dsl_scan_is_running(scn) || vdev_rebuild_active(rvd))
 		return (SET_ERROR(EBUSY));
 
 	return (0);
@@ -723,8 +748,12 @@ dsl_scan_setup_sync(void *arg, dmu_tx_t *tx)
 
 		if (vdev_resilver_needed(spa->spa_root_vdev,
 		    &scn->scn_phys.scn_min_txg, &scn->scn_phys.scn_max_txg)) {
-			spa_event_notify(spa, NULL, NULL,
+			nvlist_t *aux = fnvlist_alloc();
+			fnvlist_add_string(aux, ZFS_EV_RESILVER_TYPE,
+			    "healing");
+			spa_event_notify(spa, NULL, aux,
 			    ESC_ZFS_RESILVER_START);
+			nvlist_free(aux);
 		} else {
 			spa_event_notify(spa, NULL, NULL, ESC_ZFS_SCRUB_START);
 		}
@@ -738,6 +767,21 @@ dsl_scan_setup_sync(void *arg, dmu_tx_t *tx)
 		if (scn->scn_phys.scn_min_txg > TXG_INITIAL)
 			scn->scn_phys.scn_ddt_class_max = DDT_CLASS_DITTO;
 
+		/*
+		 * When starting a resilver clear any existing rebuild state.
+		 * This is required to prevent stale rebuild status from
+		 * being reported when a rebuild is run, then a resilver and
+		 * finally a scrub.  In which case only the scrub status
+		 * should be reported by 'zpool status'.
+		 */
+		if (scn->scn_phys.scn_func == POOL_SCAN_RESILVER) {
+			vdev_t *rvd = spa->spa_root_vdev;
+			for (uint64_t i = 0; i < rvd->vdev_children; i++) {
+				vdev_t *vd = rvd->vdev_child[i];
+				vdev_rebuild_clear_sync(
+				    (void *)(uintptr_t)vd->vdev_id, tx);
+			}
+		}
 	}
 
 	/* back to the generic stuff */
@@ -790,7 +834,7 @@ dsl_scan(dsl_pool_t *dp, pool_scan_func_t func)
 	(void) spa_vdev_state_exit(spa, NULL, 0);
 
 	if (func == POOL_SCAN_RESILVER) {
-		dsl_resilver_restart(spa->spa_dsl_pool, 0);
+		dsl_scan_restart_resilver(spa->spa_dsl_pool, 0);
 		return (0);
 	}
 
@@ -800,7 +844,7 @@ dsl_scan(dsl_pool_t *dp, pool_scan_func_t func)
 		    POOL_SCRUB_NORMAL);
 		if (err == 0) {
 			spa_event_notify(spa, NULL, NULL, ESC_ZFS_SCRUB_RESUME);
-			return (ECANCELED);
+			return (SET_ERROR(ECANCELED));
 		}
 
 		return (SET_ERROR(err));
@@ -808,41 +852,6 @@ dsl_scan(dsl_pool_t *dp, pool_scan_func_t func)
 
 	return (dsl_sync_task(spa_name(spa), dsl_scan_setup_check,
 	    dsl_scan_setup_sync, &func, 0, ZFS_SPACE_CHECK_EXTRA_RESERVED));
-}
-
-/*
- * Sets the resilver defer flag to B_FALSE on all leaf devs under vd. Returns
- * B_TRUE if we have devices that need to be resilvered and are available to
- * accept resilver I/Os.
- */
-static boolean_t
-dsl_scan_clear_deferred(vdev_t *vd, dmu_tx_t *tx)
-{
-	boolean_t resilver_needed = B_FALSE;
-	spa_t *spa = vd->vdev_spa;
-
-	for (int c = 0; c < vd->vdev_children; c++) {
-		resilver_needed |=
-		    dsl_scan_clear_deferred(vd->vdev_child[c], tx);
-	}
-
-	if (vd == spa->spa_root_vdev &&
-	    spa_feature_is_active(spa, SPA_FEATURE_RESILVER_DEFER)) {
-		spa_feature_decr(spa, SPA_FEATURE_RESILVER_DEFER, tx);
-		vdev_config_dirty(vd);
-		spa->spa_resilver_deferred = B_FALSE;
-		return (resilver_needed);
-	}
-
-	if (!vdev_is_concrete(vd) || vd->vdev_aux ||
-	    !vd->vdev_ops->vdev_op_leaf)
-		return (resilver_needed);
-
-	if (vd->vdev_resilver_deferred)
-		vd->vdev_resilver_deferred = B_FALSE;
-
-	return (!vdev_is_dead(vd) && !vd->vdev_offline &&
-	    vdev_resilver_needed(vd, NULL, NULL));
 }
 
 /* ARGSUSED */
@@ -915,7 +924,6 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		    "errors=%llu", (u_longlong_t)spa_get_errlog_size(spa));
 
 	if (DSL_SCAN_IS_SCRUB_RESILVER(scn)) {
-		spa->spa_scrub_started = B_FALSE;
 		spa->spa_scrub_active = B_FALSE;
 
 		/*
@@ -931,16 +939,30 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		if (complete &&
 		    !spa_feature_is_active(spa, SPA_FEATURE_POOL_CHECKPOINT)) {
 			vdev_dtl_reassess(spa->spa_root_vdev, tx->tx_txg,
-			    scn->scn_phys.scn_max_txg, B_TRUE);
+			    scn->scn_phys.scn_max_txg, B_TRUE, B_FALSE);
 
-			spa_event_notify(spa, NULL, NULL,
-			    scn->scn_phys.scn_min_txg ?
-			    ESC_ZFS_RESILVER_FINISH : ESC_ZFS_SCRUB_FINISH);
+			if (scn->scn_phys.scn_min_txg) {
+				nvlist_t *aux = fnvlist_alloc();
+				fnvlist_add_string(aux, ZFS_EV_RESILVER_TYPE,
+				    "healing");
+				spa_event_notify(spa, NULL, aux,
+				    ESC_ZFS_RESILVER_FINISH);
+				nvlist_free(aux);
+			} else {
+				spa_event_notify(spa, NULL, NULL,
+				    ESC_ZFS_SCRUB_FINISH);
+			}
 		} else {
 			vdev_dtl_reassess(spa->spa_root_vdev, tx->tx_txg,
-			    0, B_TRUE);
+			    0, B_TRUE, B_FALSE);
 		}
 		spa_errlog_rotate(spa);
+
+		/*
+		 * Don't clear flag until after vdev_dtl_reassess to ensure that
+		 * DTL_MISSING will get updated when possible.
+		 */
+		spa->spa_scrub_started = B_FALSE;
 
 		/*
 		 * We may have finished replacing a device.
@@ -949,21 +971,19 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		spa_async_request(spa, SPA_ASYNC_RESILVER_DONE);
 
 		/*
-		 * Clear any deferred_resilver flags in the config.
+		 * Clear any resilver_deferred flags in the config.
 		 * If there are drives that need resilvering, kick
 		 * off an asynchronous request to start resilver.
-		 * dsl_scan_clear_deferred() may update the config
+		 * vdev_clear_resilver_deferred() may update the config
 		 * before the resilver can restart. In the event of
 		 * a crash during this period, the spa loading code
 		 * will find the drives that need to be resilvered
-		 * when the machine reboots and start the resilver then.
+		 * and start the resilver then.
 		 */
-		boolean_t resilver_needed =
-		    dsl_scan_clear_deferred(spa->spa_root_vdev, tx);
-		if (resilver_needed) {
+		if (spa_feature_is_enabled(spa, SPA_FEATURE_RESILVER_DEFER) &&
+		    vdev_clear_resilver_deferred(spa->spa_root_vdev, tx)) {
 			spa_history_log_internal(spa,
-			    "starting deferred resilver", tx,
-			    "errors=%llu",
+			    "starting deferred resilver", tx, "errors=%llu",
 			    (u_longlong_t)spa_get_errlog_size(spa));
 			spa_async_request(spa, SPA_ASYNC_RESILVER);
 		}
@@ -1076,7 +1096,7 @@ dsl_scrub_set_pause_resume(const dsl_pool_t *dp, pool_scrub_cmd_t cmd)
 
 /* start a new scan, or restart an existing one. */
 void
-dsl_resilver_restart(dsl_pool_t *dp, uint64_t txg)
+dsl_scan_restart_resilver(dsl_pool_t *dp, uint64_t txg)
 {
 	if (txg == 0) {
 		dmu_tx_t *tx;
@@ -1224,10 +1244,13 @@ scan_ds_queue_sync(dsl_scan_t *scn, dmu_tx_t *tx)
 static boolean_t
 dsl_scan_should_clear(dsl_scan_t *scn)
 {
+	spa_t *spa = scn->scn_dp->dp_spa;
 	vdev_t *rvd = scn->scn_dp->dp_spa->spa_root_vdev;
-	uint64_t mlim_hard, mlim_soft, mused;
-	uint64_t alloc = metaslab_class_get_alloc(spa_normal_class(
-	    scn->scn_dp->dp_spa));
+	uint64_t alloc, mlim_hard, mlim_soft, mused;
+
+	alloc = metaslab_class_get_alloc(spa_normal_class(spa));
+	alloc += metaslab_class_get_alloc(spa_special_class(spa));
+	alloc += metaslab_class_get_alloc(spa_dedup_class(spa));
 
 	mlim_hard = MAX((physmem / zfs_scan_mem_lim_fact) * PAGESIZE,
 	    zfs_scan_mem_lim_min);
@@ -1244,7 +1267,7 @@ dsl_scan_should_clear(dsl_scan_t *scn)
 		if (queue != NULL) {
 			/* # extents in exts_by_size = # in exts_by_addr */
 			mused += zfs_btree_numnodes(&queue->q_exts_by_size) *
-			    sizeof (range_seg_t) + queue->q_sio_memused;
+			    sizeof (range_seg_gap_t) + queue->q_sio_memused;
 		}
 		mutex_exit(&tvd->vdev_scan_io_queue_lock);
 	}
@@ -1604,7 +1627,7 @@ dsl_scan_prefetch_dnode(dsl_scan_t *scn, dnode_phys_t *dnp,
 	scan_prefetch_ctx_rele(spc, FTAG);
 }
 
-void
+static void
 dsl_scan_prefetch_cb(zio_t *zio, const zbookmark_phys_t *zb, const blkptr_t *bp,
     arc_buf_t *buf, void *private)
 {
@@ -4308,6 +4331,36 @@ dsl_scan_freed(spa_t *spa, const blkptr_t *bp)
 
 	for (int i = 0; i < BP_GET_NDVAS(bp); i++)
 		dsl_scan_freed_dva(spa, bp, i);
+}
+
+/*
+ * Check if a vdev needs resilvering (non-empty DTL), if so, and resilver has
+ * not started, start it. Otherwise, only restart if max txg in DTL range is
+ * greater than the max txg in the current scan. If the DTL max is less than
+ * the scan max, then the vdev has not missed any new data since the resilver
+ * started, so a restart is not needed.
+ */
+void
+dsl_scan_assess_vdev(dsl_pool_t *dp, vdev_t *vd)
+{
+	uint64_t min, max;
+
+	if (!vdev_resilver_needed(vd, &min, &max))
+		return;
+
+	if (!dsl_scan_resilvering(dp)) {
+		spa_async_request(dp->dp_spa, SPA_ASYNC_RESILVER);
+		return;
+	}
+
+	if (max <= dp->dp_scan->scn_phys.scn_max_txg)
+		return;
+
+	/* restart is needed, check if it can be deferred */
+	if (spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_RESILVER_DEFER))
+		vdev_defer_resilver(vd);
+	else
+		spa_async_request(dp->dp_spa, SPA_ASYNC_RESILVER);
 }
 
 /* BEGIN CSTYLED */

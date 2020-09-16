@@ -38,7 +38,6 @@
 #include <sys/file.h>
 #include <sys/kmem.h>
 #include <sys/errno.h>
-#include <sys/mode.h>
 #include <sys/atomic.h>
 #include <sys/zfs_dir.h>
 #include <sys/zfs_acl.h>
@@ -55,7 +54,7 @@
 #include <sys/dmu.h>
 #include <sys/dmu_objset.h>
 #include <sys/dmu_tx.h>
-#include <sys/refcount.h>
+#include <sys/zfs_refcount.h>
 #include <sys/stat.h>
 #include <sys/zap.h>
 #include <sys/zfs_znode.h>
@@ -90,7 +89,7 @@ int zfs_unlink_suspend_progress = 0;
  * called with the rangelock_t's rl_lock held, which avoids races.
  */
 static void
-zfs_rangelock_cb(locked_range_t *new, void *arg)
+zfs_rangelock_cb(zfs_locked_range_t *new, void *arg)
 {
 	znode_t *zp = arg;
 
@@ -129,7 +128,7 @@ zfs_znode_cache_constructor(void *buf, void *arg, int kmflags)
 	mutex_init(&zp->z_acl_lock, NULL, MUTEX_DEFAULT, NULL);
 	rw_init(&zp->z_xattr_lock, NULL, RW_DEFAULT, NULL);
 
-	rangelock_init(&zp->z_rangelock, zfs_rangelock_cb, zp);
+	zfs_rangelock_init(&zp->z_rangelock, zfs_rangelock_cb, zp);
 
 	zp->z_dirlocks = NULL;
 	zp->z_acl_cached = NULL;
@@ -151,7 +150,7 @@ zfs_znode_cache_destructor(void *buf, void *arg)
 	rw_destroy(&zp->z_name_lock);
 	mutex_destroy(&zp->z_acl_lock);
 	rw_destroy(&zp->z_xattr_lock);
-	rangelock_fini(&zp->z_rangelock);
+	zfs_rangelock_fini(&zp->z_rangelock);
 
 	ASSERT(zp->z_dirlocks == NULL);
 	ASSERT(zp->z_acl_cached == NULL);
@@ -250,7 +249,7 @@ zfs_znode_hold_compare(const void *a, const void *b)
 	return (TREE_CMP(zh_a->zh_obj, zh_b->zh_obj));
 }
 
-boolean_t
+static boolean_t __maybe_unused
 zfs_znode_held(zfsvfs_t *zfsvfs, uint64_t obj)
 {
 	znode_hold_t *zh, search;
@@ -319,6 +318,12 @@ zfs_znode_hold_exit(zfsvfs_t *zfsvfs, znode_hold_t *zh)
 
 	if (remove == B_TRUE)
 		kmem_cache_free(znode_hold_cache, zh);
+}
+
+dev_t
+zfs_cmpldev(uint64_t dev)
+{
+	return (dev);
 }
 
 static void
@@ -446,7 +451,7 @@ zfs_inode_set_ops(zfsvfs_t *zfsvfs, struct inode *ip)
 	}
 }
 
-void
+static void
 zfs_set_inode_flags(znode_t *zp, struct inode *ip)
 {
 	/*
@@ -1478,20 +1483,20 @@ zfs_extend(znode_t *zp, uint64_t end)
 {
 	zfsvfs_t *zfsvfs = ZTOZSB(zp);
 	dmu_tx_t *tx;
-	locked_range_t *lr;
+	zfs_locked_range_t *lr;
 	uint64_t newblksz;
 	int error;
 
 	/*
 	 * We will change zp_size, lock the whole file.
 	 */
-	lr = rangelock_enter(&zp->z_rangelock, 0, UINT64_MAX, RL_WRITER);
+	lr = zfs_rangelock_enter(&zp->z_rangelock, 0, UINT64_MAX, RL_WRITER);
 
 	/*
 	 * Nothing to do if file already at desired length.
 	 */
 	if (end <= zp->z_size) {
-		rangelock_exit(lr);
+		zfs_rangelock_exit(lr);
 		return (0);
 	}
 	tx = dmu_tx_create(zfsvfs->z_os);
@@ -1521,7 +1526,7 @@ zfs_extend(znode_t *zp, uint64_t end)
 	error = dmu_tx_assign(tx, TXG_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
-		rangelock_exit(lr);
+		zfs_rangelock_exit(lr);
 		return (error);
 	}
 
@@ -1533,7 +1538,7 @@ zfs_extend(znode_t *zp, uint64_t end)
 	VERIFY(0 == sa_update(zp->z_sa_hdl, SA_ZPL_SIZE(ZTOZSB(zp)),
 	    &zp->z_size, sizeof (zp->z_size), tx));
 
-	rangelock_exit(lr);
+	zfs_rangelock_exit(lr);
 
 	dmu_tx_commit(tx);
 
@@ -1596,19 +1601,19 @@ static int
 zfs_free_range(znode_t *zp, uint64_t off, uint64_t len)
 {
 	zfsvfs_t *zfsvfs = ZTOZSB(zp);
-	locked_range_t *lr;
+	zfs_locked_range_t *lr;
 	int error;
 
 	/*
 	 * Lock the range being freed.
 	 */
-	lr = rangelock_enter(&zp->z_rangelock, off, len, RL_WRITER);
+	lr = zfs_rangelock_enter(&zp->z_rangelock, off, len, RL_WRITER);
 
 	/*
 	 * Nothing to do if file already at desired length.
 	 */
 	if (off >= zp->z_size) {
-		rangelock_exit(lr);
+		zfs_rangelock_exit(lr);
 		return (0);
 	}
 
@@ -1658,7 +1663,7 @@ zfs_free_range(znode_t *zp, uint64_t off, uint64_t len)
 				    page_len);
 		}
 	}
-	rangelock_exit(lr);
+	zfs_rangelock_exit(lr);
 
 	return (error);
 }
@@ -1676,7 +1681,7 @@ zfs_trunc(znode_t *zp, uint64_t end)
 {
 	zfsvfs_t *zfsvfs = ZTOZSB(zp);
 	dmu_tx_t *tx;
-	locked_range_t *lr;
+	zfs_locked_range_t *lr;
 	int error;
 	sa_bulk_attr_t bulk[2];
 	int count = 0;
@@ -1684,20 +1689,20 @@ zfs_trunc(znode_t *zp, uint64_t end)
 	/*
 	 * We will change zp_size, lock the whole file.
 	 */
-	lr = rangelock_enter(&zp->z_rangelock, 0, UINT64_MAX, RL_WRITER);
+	lr = zfs_rangelock_enter(&zp->z_rangelock, 0, UINT64_MAX, RL_WRITER);
 
 	/*
 	 * Nothing to do if file already at desired length.
 	 */
 	if (end >= zp->z_size) {
-		rangelock_exit(lr);
+		zfs_rangelock_exit(lr);
 		return (0);
 	}
 
 	error = dmu_free_long_range(zfsvfs->z_os, zp->z_id, end,
 	    DMU_OBJECT_END);
 	if (error) {
-		rangelock_exit(lr);
+		zfs_rangelock_exit(lr);
 		return (error);
 	}
 	tx = dmu_tx_create(zfsvfs->z_os);
@@ -1707,7 +1712,7 @@ zfs_trunc(znode_t *zp, uint64_t end)
 	error = dmu_tx_assign(tx, TXG_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
-		rangelock_exit(lr);
+		zfs_rangelock_exit(lr);
 		return (error);
 	}
 
@@ -1723,7 +1728,7 @@ zfs_trunc(znode_t *zp, uint64_t end)
 	VERIFY(sa_bulk_update(zp->z_sa_hdl, bulk, count, tx) == 0);
 
 	dmu_tx_commit(tx);
-	rangelock_exit(lr);
+	zfs_rangelock_exit(lr);
 
 	return (0);
 }
@@ -2008,7 +2013,7 @@ zfs_grab_sa_handle(objset_t *osp, uint64_t obj, sa_handle_t **hdlp,
 	return (0);
 }
 
-void
+static void
 zfs_release_sa_handle(sa_handle_t *hdl, dmu_buf_t *db, void *tag)
 {
 	sa_handle_destroy(hdl);

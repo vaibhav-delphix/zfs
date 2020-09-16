@@ -373,7 +373,7 @@ typedef struct {
  *	- the write occupies only one block
  * WR_COPIED:
  *    If we know we'll immediately be committing the
- *    transaction (FSYNC or FDSYNC), then we allocate a larger
+ *    transaction (O_SYNC or O_DSYNC), then we allocate a larger
  *    log record here for the data and copy the data in.
  * WR_NEED_COPY:
  *    Otherwise we don't allocate a buffer, and *if* we need to
@@ -493,8 +493,10 @@ extern itx_t	*zil_itx_create(uint64_t txtype, size_t lrsize);
 extern void	zil_itx_destroy(itx_t *itx);
 extern void	zil_itx_assign(zilog_t *zilog, itx_t *itx, dmu_tx_t *tx);
 
+extern void	zil_async_to_sync(zilog_t *zilog, uint64_t oid);
 extern void	zil_commit(zilog_t *zilog, uint64_t oid);
 extern void	zil_commit_impl(zilog_t *zilog, uint64_t oid);
+extern void	zil_remove_async(zilog_t *zilog, uint64_t oid);
 
 extern int	zil_reset(const char *osname, void *txarg);
 extern int	zil_claim(struct dsl_pool *dp,

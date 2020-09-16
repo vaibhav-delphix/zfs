@@ -4,8 +4,8 @@
 %define not_rpm 1
 %endif
 
-# See comment in zfs.spec.in.
-%global __brp_mangle_shebangs_exclude_from arc_summary.py|arcstat.py|dbufstat.py|test-runner.py|zts-report.py
+# Exclude input files from mangling
+%global __brp_mangle_shebangs_exclude_from ^/usr/src/.*$
 
 %define module  @PACKAGE@
 %define mkconf  scripts/dkms.mkconf
@@ -18,7 +18,7 @@ Summary:        Kernel module(s) (dkms)
 
 Group:          System Environment/Kernel
 License:        @ZFS_META_LICENSE@
-URL:            http://zfsonlinux.org/
+URL:            https://zfsonlinux.org/
 Source0:        %{module}-%{version}.tar.gz
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildArch:      noarch
@@ -93,7 +93,7 @@ fi
 CONFIG_H="/var/lib/dkms/%{module}/%{version}/*/*/%{module}_config.h"
 SPEC_META_ALIAS="@PACKAGE@-@VERSION@-@RELEASE@"
 DKMS_META_ALIAS=`cat $CONFIG_H 2>/dev/null |
-    awk -F'"' '/META_ALIAS/ { print $2; exit 0 }'`
+    awk -F'"' '/META_ALIAS\s+"/ { print $2; exit 0 }'`
 if [ "$SPEC_META_ALIAS" = "$DKMS_META_ALIAS" ]; then
     echo -e
     echo -e "Uninstall of %{module} module ($SPEC_META_ALIAS) beginning:"

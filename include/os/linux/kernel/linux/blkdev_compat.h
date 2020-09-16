@@ -487,4 +487,20 @@ blk_generic_end_io_acct(struct request_queue *q, int rw,
 #endif
 }
 
+#ifndef HAVE_SUBMIT_BIO_IN_BLOCK_DEVICE_OPERATIONS
+static inline struct request_queue *
+blk_generic_alloc_queue(make_request_fn make_request, int node_id)
+{
+#if defined(HAVE_BLK_ALLOC_QUEUE_REQUEST_FN)
+	return (blk_alloc_queue(make_request, node_id));
+#else
+	struct request_queue *q = blk_alloc_queue(GFP_KERNEL);
+	if (q != NULL)
+		blk_queue_make_request(q, make_request);
+
+	return (q);
+#endif
+}
+#endif /* !HAVE_SUBMIT_BIO_IN_BLOCK_DEVICE_OPERATIONS */
+
 #endif /* _ZFS_BLKDEV_H */

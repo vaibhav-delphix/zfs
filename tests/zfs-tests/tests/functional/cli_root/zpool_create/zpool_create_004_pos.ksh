@@ -45,8 +45,6 @@ verify_runnable "global"
 
 function cleanup
 {
-	typeset pool=""
-
 	poolexists $TESTPOOL1 && destroy_pool $TESTPOOL1
 	poolexists $TESTPOOL && destroy_pool $TESTPOOL
 

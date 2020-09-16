@@ -31,6 +31,7 @@
  * Copyright 2015, OmniTI Computer Consulting, Inc. All rights reserved.
  * Copyright (c) 2018 George Melikov. All Rights Reserved.
  * Copyright (c) 2019 Datto, Inc. All rights reserved.
+ * Copyright (c) 2020 The MathWorks, Inc. All rights reserved.
  */
 
 /*
@@ -137,8 +138,8 @@ zfsctl_snapshot_alloc(char *full_name, char *full_path, spa_t *spa,
 
 	se = kmem_zalloc(sizeof (zfs_snapentry_t), KM_SLEEP);
 
-	se->se_name = strdup(full_name);
-	se->se_path = strdup(full_path);
+	se->se_name = kmem_strdup(full_name);
+	se->se_path = kmem_strdup(full_path);
 	se->se_spa = spa;
 	se->se_objsetid = objsetid;
 	se->se_root_dentry = root_dentry;
@@ -157,8 +158,8 @@ static void
 zfsctl_snapshot_free(zfs_snapentry_t *se)
 {
 	zfs_refcount_destroy(&se->se_refcount);
-	strfree(se->se_name);
-	strfree(se->se_path);
+	kmem_strfree(se->se_name);
+	kmem_strfree(se->se_path);
 
 	kmem_free(se, sizeof (zfs_snapentry_t));
 }
@@ -311,8 +312,8 @@ zfsctl_snapshot_rename(char *old_snapname, char *new_snapname)
 		return (SET_ERROR(ENOENT));
 
 	zfsctl_snapshot_remove(se);
-	strfree(se->se_name);
-	se->se_name = strdup(new_snapname);
+	kmem_strfree(se->se_name);
+	se->se_name = kmem_strdup(new_snapname);
 	zfsctl_snapshot_add(se);
 	zfsctl_snapshot_rele(se);
 
@@ -978,6 +979,22 @@ out:
 }
 
 /*
+ * Flush everything out of the kernel's export table and such.
+ * This is needed as once the snapshot is used over NFS, its
+ * entries in svc_export and svc_expkey caches hold reference
+ * to the snapshot mount point. There is no known way of flushing
+ * only the entries related to the snapshot.
+ */
+static void
+exportfs_flush(void)
+{
+	char *argv[] = { "/usr/sbin/exportfs", "-f", NULL };
+	char *envp[] = { NULL };
+
+	(void) call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
+}
+
+/*
  * Attempt to unmount a snapshot by making a call to user space.
  * There is no assurance that this can or will succeed, is just a
  * best effort.  In the case where it does fail, perhaps because
@@ -998,6 +1015,8 @@ zfsctl_snapshot_unmount(char *snapname, int flags)
 		return (SET_ERROR(ENOENT));
 	}
 	rw_exit(&zfs_snapshot_lock);
+
+	exportfs_flush();
 
 	if (flags & MNT_FORCE)
 		argv[4] = "-fn";
@@ -1053,7 +1072,8 @@ zfsctl_snapshot_mount(struct path *path, int flags)
 	 * on mount.zfs(8).
 	 */
 	snprintf(full_path, MAXPATHLEN, "%s/.zfs/snapshot/%s",
-	    zfsvfs->z_vfs->vfs_mntpoint, dname(dentry));
+	    zfsvfs->z_vfs->vfs_mntpoint ? zfsvfs->z_vfs->vfs_mntpoint : "",
+	    dname(dentry));
 
 	/*
 	 * Multiple concurrent automounts of a snapshot are never allowed.
@@ -1184,7 +1204,7 @@ zfsctl_shares_lookup(struct inode *dip, char *name, struct inode **ipp,
     int flags, cred_t *cr, int *direntflags, pathname_t *realpnp)
 {
 	zfsvfs_t *zfsvfs = ITOZSB(dip);
-	struct inode *ip;
+	znode_t *zp;
 	znode_t *dzp;
 	int error;
 
@@ -1196,8 +1216,8 @@ zfsctl_shares_lookup(struct inode *dip, char *name, struct inode **ipp,
 	}
 
 	if ((error = zfs_zget(zfsvfs, zfsvfs->z_shares_dir, &dzp)) == 0) {
-		error = zfs_lookup(ZTOI(dzp), name, &ip, 0, cr, NULL, NULL);
-		iput(ZTOI(dzp));
+		error = zfs_lookup(dzp, name, &zp, 0, cr, NULL, NULL);
+		zrele(dzp);
 	}
 
 	ZFS_EXIT(zfsvfs);

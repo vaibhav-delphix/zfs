@@ -14,7 +14,7 @@
  */
 
 /*
- * Copyright (c) 2017, 2019 by Delphix. All rights reserved.
+ * Copyright (c) 2017, 2020 by Delphix. All rights reserved.
  */
 
 /*
@@ -56,7 +56,7 @@
  *
  * == ZTHR creation
  *
- * Every zthr needs three inputs to start running:
+ * Every zthr needs four inputs to start running:
  *
  * 1] A user-defined checker function (checkfunc) that decides whether
  *    the zthr should start working or go to sleep. The function should
@@ -71,6 +71,9 @@
  *
  * 3] A void args pointer that will be passed to checkfunc and func
  *    implicitly by the infrastructure.
+ *
+ * 4] A name for the thread. This string must be valid for the lifetime
+ *    of the zthr.
  *
  * The reason why the above API needs two different functions,
  * instead of one that both checks and does the work, has to do with
@@ -221,6 +224,7 @@ struct zthr {
 	zthr_checkfunc_t	*zthr_checkfunc;
 	zthr_func_t	*zthr_func;
 	void		*zthr_arg;
+	const char	*zthr_name;
 };
 
 static void
@@ -237,15 +241,10 @@ zthr_procedure(void *arg)
 			t->zthr_func(t->zthr_arg, t);
 			mutex_enter(&t->zthr_state_lock);
 		} else {
-			/*
-			 * cv_wait_sig() is used instead of cv_wait() in
-			 * order to prevent this process from incorrectly
-			 * contributing to the system load average when idle.
-			 */
 			if (t->zthr_sleep_timeout == 0) {
-				cv_wait_sig(&t->zthr_cv, &t->zthr_state_lock);
+				cv_wait_idle(&t->zthr_cv, &t->zthr_state_lock);
 			} else {
-				(void) cv_timedwait_sig_hires(&t->zthr_cv,
+				(void) cv_timedwait_idle_hires(&t->zthr_cv,
 				    &t->zthr_state_lock, t->zthr_sleep_timeout,
 				    MSEC2NSEC(1), 0);
 			}
@@ -269,9 +268,11 @@ zthr_procedure(void *arg)
 }
 
 zthr_t *
-zthr_create(zthr_checkfunc_t *checkfunc, zthr_func_t *func, void *arg)
+zthr_create(const char *zthr_name, zthr_checkfunc_t *checkfunc,
+    zthr_func_t *func, void *arg)
 {
-	return (zthr_create_timer(checkfunc, func, arg, (hrtime_t)0));
+	return (zthr_create_timer(zthr_name, checkfunc,
+	    func, arg, (hrtime_t)0));
 }
 
 /*
@@ -280,8 +281,8 @@ zthr_create(zthr_checkfunc_t *checkfunc, zthr_func_t *func, void *arg)
  * start working if required) will be triggered.
  */
 zthr_t *
-zthr_create_timer(zthr_checkfunc_t *checkfunc, zthr_func_t *func,
-    void *arg, hrtime_t max_sleep)
+zthr_create_timer(const char *zthr_name, zthr_checkfunc_t *checkfunc,
+    zthr_func_t *func, void *arg, hrtime_t max_sleep)
 {
 	zthr_t *t = kmem_zalloc(sizeof (*t), KM_SLEEP);
 	mutex_init(&t->zthr_state_lock, NULL, MUTEX_DEFAULT, NULL);
@@ -294,9 +295,11 @@ zthr_create_timer(zthr_checkfunc_t *checkfunc, zthr_func_t *func,
 	t->zthr_func = func;
 	t->zthr_arg = arg;
 	t->zthr_sleep_timeout = max_sleep;
+	t->zthr_name = zthr_name;
 
-	t->zthr_thread = thread_create(NULL, 0, zthr_procedure, t,
-	    0, &p0, TS_RUN, minclsyspri);
+	t->zthr_thread = thread_create_named(zthr_name, NULL, 0,
+	    zthr_procedure, t, 0, &p0, TS_RUN, minclsyspri);
+
 	mutex_exit(&t->zthr_state_lock);
 
 	return (t);
@@ -419,8 +422,8 @@ zthr_resume(zthr_t *t)
 	 *     no-op.
 	 */
 	if (t->zthr_thread == NULL) {
-		t->zthr_thread = thread_create(NULL, 0, zthr_procedure, t,
-		    0, &p0, TS_RUN, minclsyspri);
+		t->zthr_thread = thread_create_named(t->zthr_name, NULL, 0,
+		    zthr_procedure, t, 0, &p0, TS_RUN, minclsyspri);
 	}
 
 	mutex_exit(&t->zthr_state_lock);

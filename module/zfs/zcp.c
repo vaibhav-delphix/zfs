@@ -396,7 +396,7 @@ zcp_lua_to_nvlist_impl(lua_State *state, int index, nvlist_t *nvl,
 	case LUA_TTABLE: {
 		nvlist_t *value_nvl = zcp_table_to_nvlist(state, index, depth);
 		if (value_nvl == NULL)
-			return (EINVAL);
+			return (SET_ERROR(EINVAL));
 
 		fnvlist_add_nvlist(nvl, key, value_nvl);
 		fnvlist_free(value_nvl);
@@ -406,7 +406,7 @@ zcp_lua_to_nvlist_impl(lua_State *state, int index, nvlist_t *nvl,
 		(void) lua_pushfstring(state,
 		    "Invalid value type '%s' for key '%s'",
 		    lua_typename(state, lua_type(state, index)), key);
-		return (EINVAL);
+		return (SET_ERROR(EINVAL));
 	}
 
 	return (0);
@@ -585,7 +585,7 @@ zcp_nvpair_value_to_lua(lua_State *state, nvpair_t *pair,
 			    "Unhandled nvpair type %d for key '%s'",
 			    nvpair_type(pair), nvpair_name(pair));
 		}
-		return (EINVAL);
+		return (SET_ERROR(EINVAL));
 	}
 	}
 	return (err);
@@ -1150,6 +1150,7 @@ zcp_eval(const char *poolname, const char *program, boolean_t sync,
 	runinfo.zri_outnvl = outnvl;
 	runinfo.zri_result = 0;
 	runinfo.zri_cred = CRED();
+	runinfo.zri_proc = curproc;
 	runinfo.zri_timed_out = B_FALSE;
 	runinfo.zri_canceled = B_FALSE;
 	runinfo.zri_sync = sync;

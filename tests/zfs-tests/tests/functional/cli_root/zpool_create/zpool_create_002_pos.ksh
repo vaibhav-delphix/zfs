@@ -64,8 +64,7 @@ log_assert "'zpool create -f <pool> <vspec> ...' can successfully create" \
 	"a new pool in some cases."
 
 create_pool $TESTPOOL $DISK0
-log_must echo "y" | newfs \
-    ${DEV_RDSKDIR}/${DISK1} >/dev/null 2>&1
+log_must eval "new_fs ${DEV_RDSKDIR}/${DISK1} >/dev/null 2>&1"
 typeset disk1=$(create_blockfile $FILESIZE)
 typeset disk2=$(create_blockfile $FILESIZE1)
 

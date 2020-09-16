@@ -164,9 +164,8 @@ AC_DEFUN([ZFS_AC_KERNEL_S_D_OP], [
 	AC_MSG_CHECKING([whether super_block has s_d_op])
 	ZFS_LINUX_TEST_RESULT([super_block_s_d_op], [
 		AC_MSG_RESULT(yes)
-		AC_DEFINE(HAVE_S_D_OP, 1, [struct super_block has s_d_op])
 	], [
-		AC_MSG_RESULT(no)
+		ZFS_LINUX_TEST_ERROR([super_block s_d_op])
 	])
 ])
 

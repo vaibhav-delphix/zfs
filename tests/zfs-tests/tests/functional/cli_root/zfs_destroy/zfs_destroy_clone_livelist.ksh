@@ -41,7 +41,7 @@ function cleanup
 {
 	datasetexists $TESTPOOL/$TESTFS1 && zfs destroy -R $TESTPOOL/$TESTFS1
 	# reset the livelist sublist size to its original value
-	set_tunable64 zfs_livelist_max_entries $ORIGINAL_MAX
+	set_tunable64 LIVELIST_MAX_ENTRIES $ORIGINAL_MAX
 }
 
 function clone_write_file
@@ -143,7 +143,7 @@ function test_clone_clone_promote
 	log_must zdb -bcc $TESTPOOL
 }
 
-ORIGINAL_MAX=$(get_tunable zfs_livelist_max_entries)
+ORIGINAL_MAX=$(get_tunable LIVELIST_MAX_ENTRIES)
 
 log_onexit cleanup
 log_must zfs create $TESTPOOL/$TESTFS1
@@ -151,7 +151,7 @@ log_must mkfile 20m /$TESTPOOL/$TESTFS1/atestfile
 log_must zfs snapshot $TESTPOOL/$TESTFS1@snap
 
 # set a small livelist entry size to more easily test multiple entry livelists
-set_tunable64 zfs_livelist_max_entries 20
+set_tunable64 LIVELIST_MAX_ENTRIES 20
 
 test_one_empty
 test_one

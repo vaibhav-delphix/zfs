@@ -7,14 +7,9 @@ VPATH = \
 
 # Suppress unused but set variable warnings often due to ASSERTs
 AM_CFLAGS += $(NO_UNUSED_BUT_SET_VARIABLE)
+AM_CFLAGS += $(LIBCRYPTO_CFLAGS) $(ZLIB_CFLAGS)
 
-libzfs_pcdir = $(datarootdir)/pkgconfig
-libzfs_pc_DATA = libzfs.pc libzfs_core.pc
-
-DEFAULT_INCLUDES += \
-	-I$(top_srcdir)/include \
-	-I$(top_srcdir)/module/icp/include \
-	-I$(top_srcdir)/lib/libspl/include
+pkgconfig_DATA = libzfs.pc
 
 lib_LTLIBRARIES = libzfs.la
 
@@ -32,8 +27,25 @@ USER_C = \
 	libzfs_status.c \
 	libzfs_util.c
 
+
+if BUILD_FREEBSD
+USER_C += \
+	os/freebsd/libzfs_compat.c \
+	os/freebsd/libzfs_ioctl_compat.c \
+	os/freebsd/libzfs_zmount.c
+endif
+
+if BUILD_LINUX
+USER_C += \
+	os/linux/libzfs_mount_os.c \
+	os/linux/libzfs_pool_os.c \
+	os/linux/libzfs_sendrecv_os.c \
+	os/linux/libzfs_util_os.c
+endif
+
 KERNEL_C = \
 	algs/sha2/sha2.c \
+	cityhash.c \
 	zfeature_common.c \
 	zfs_comutil.c \
 	zfs_deleg.c \
@@ -50,21 +62,32 @@ KERNEL_C = \
 	zpool_prop.c \
 	zprop_common.c
 
+dist_libzfs_la_SOURCES = \
+	$(USER_C)
+
 nodist_libzfs_la_SOURCES = \
-	$(USER_C) \
 	$(KERNEL_C)
 
 libzfs_la_LIBADD = \
-	$(top_builddir)/lib/libnvpair/libnvpair.la \
-	$(top_builddir)/lib/libshare/libshare.la \
-	$(top_builddir)/lib/libuutil/libuutil.la \
-	$(top_builddir)/lib/libzfs_core/libzfs_core.la \
-	$(top_builddir)/lib/libzutil/libzutil.la
+	$(abs_top_builddir)/lib/libshare/libshare.la \
+	$(abs_top_builddir)/lib/libzfs_core/libzfs_core.la \
+	$(abs_top_builddir)/lib/libnvpair/libnvpair.la \
+	$(abs_top_builddir)/lib/libuutil/libuutil.la
 
-libzfs_la_LIBADD += -lm $(LIBSSL)
-libzfs_la_LDFLAGS = -version-info 2:0:0
+libzfs_la_LIBADD += -lm $(LIBCRYPTO_LIBS) $(ZLIB_LIBS) $(LTLIBINTL)
 
-EXTRA_DIST = $(libzfs_pc_DATA) $(USER_C)
+libzfs_la_LDFLAGS = -pthread
+
+if !ASAN_ENABLED
+libzfs_la_LDFLAGS += -Wl,-z,defs
+endif
+
+if BUILD_FREEBSD
+libzfs_la_LIBADD += -lutil -lgeom
+libzfs_la_LDFLAGS += -version-info 4:0:0
+else
+libzfs_la_LDFLAGS += -version-info 2:0:0
+endif
 
 # Licensing data
-EXTRA_DIST += THIRDPARTYLICENSE.openssl THIRDPARTYLICENSE.openssl.descrip
+EXTRA_DIST = THIRDPARTYLICENSE.openssl THIRDPARTYLICENSE.openssl.descrip

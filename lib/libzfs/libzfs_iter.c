@@ -38,7 +38,7 @@
 
 #include "libzfs_impl.h"
 
-int
+static int
 zfs_iter_clones(zfs_handle_t *zhp, zfs_iter_f func, void *data)
 {
 	nvlist_t *nvl = zfs_get_clones_nvl(zhp);
@@ -69,7 +69,7 @@ zfs_do_list_ioctl(zfs_handle_t *zhp, int arg, zfs_cmd_t *zc)
 	orig_cookie = zc->zc_cookie;
 top:
 	(void) strlcpy(zc->zc_name, zhp->zfs_name, sizeof (zc->zc_name));
-	rc = ioctl(zhp->zfs_hdl->libzfs_fd, arg, zc);
+	rc = zfs_ioctl(zhp->zfs_hdl, arg, zc);
 
 	if (rc == -1) {
 		switch (errno) {

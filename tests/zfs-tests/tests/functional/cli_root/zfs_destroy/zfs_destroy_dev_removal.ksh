@@ -32,15 +32,15 @@ function cleanup
 {
 	poolexists $TESTPOOL2 && zpool destroy $TESTPOOL2
 	[[ -f $VIRTUAL_DISK1 ]] && log_must rm $VIRTUAL_DISK1
-	[[ -f $VIRTUAL_DISK2 ]] && lot_must rm $VIRTUAL_DISK2
+	[[ -f $VIRTUAL_DISK2 ]] && log_must rm $VIRTUAL_DISK2
 }
 
 log_onexit cleanup
 
-VIRTUAL_DISK1=/var/tmp/disk1
-VIRTUAL_DISK2=/var/tmp/disk2
-log_must mkfile $(($MINVDEVSIZE * 8)) $VIRTUAL_DISK1
-log_must mkfile $(($MINVDEVSIZE * 16)) $VIRTUAL_DISK2
+VIRTUAL_DISK1=$TEST_BASE_DIR/disk1
+VIRTUAL_DISK2=$TEST_BASE_DIR/disk2
+log_must truncate -s $(($MINVDEVSIZE * 8)) $VIRTUAL_DISK1
+log_must truncate -s $(($MINVDEVSIZE * 16)) $VIRTUAL_DISK2
 
 log_must zpool create $TESTPOOL2 $VIRTUAL_DISK1
 log_must poolexists $TESTPOOL2

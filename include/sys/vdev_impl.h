@@ -38,6 +38,7 @@
 #include <sys/uberblock_impl.h>
 #include <sys/vdev_indirect_mapping.h>
 #include <sys/vdev_indirect_births.h>
+#include <sys/vdev_rebuild.h>
 #include <sys/vdev_removal.h>
 #include <sys/zfs_ratelimit.h>
 
@@ -68,7 +69,7 @@ extern uint32_t zfs_vdev_async_write_max_active;
  * Virtual device operations
  */
 typedef int	vdev_open_func_t(vdev_t *vd, uint64_t *size, uint64_t *max_size,
-    uint64_t *ashift);
+    uint64_t *ashift, uint64_t *pshift);
 typedef void	vdev_close_func_t(vdev_t *vd);
 typedef uint64_t vdev_asize_func_t(vdev_t *vd, uint64_t psize);
 typedef void	vdev_io_start_func_t(zio_t *zio);
@@ -215,13 +216,30 @@ struct vdev {
 	uint64_t	vdev_min_asize;	/* min acceptable asize		*/
 	uint64_t	vdev_max_asize;	/* max acceptable asize		*/
 	uint64_t	vdev_ashift;	/* block alignment shift	*/
+
+	/*
+	 * Logical block alignment shift
+	 *
+	 * The smallest sized/aligned I/O supported by the device.
+	 */
+	uint64_t	vdev_logical_ashift;
+	/*
+	 * Physical block alignment shift
+	 *
+	 * The device supports logical I/Os with vdev_logical_ashift
+	 * size/alignment, but optimum performance will be achieved by
+	 * aligning/sizing requests to vdev_physical_ashift.  Smaller
+	 * requests may be inflated or incur device level read-modify-write
+	 * operations.
+	 *
+	 * May be 0 to indicate no preference (i.e. use vdev_logical_ashift).
+	 */
+	uint64_t	vdev_physical_ashift;
 	uint64_t	vdev_state;	/* see VDEV_STATE_* #defines	*/
 	uint64_t	vdev_prevstate;	/* used when reopening a vdev	*/
 	vdev_ops_t	*vdev_ops;	/* vdev operations		*/
 	spa_t		*vdev_spa;	/* spa for this vdev		*/
 	void		*vdev_tsd;	/* type-specific data		*/
-	vnode_t		*vdev_name_vp;	/* vnode for pathname		*/
-	vnode_t		*vdev_devid_vp;	/* vnode for devid		*/
 	vdev_t		*vdev_top;	/* top-level vdev		*/
 	vdev_t		*vdev_parent;	/* parent vdev			*/
 	vdev_t		**vdev_child;	/* array of children		*/
@@ -275,7 +293,7 @@ struct vdev {
 	range_tree_t	*vdev_initialize_tree;	/* valid while initializing */
 	uint64_t	vdev_initialize_bytes_est;
 	uint64_t	vdev_initialize_bytes_done;
-	time_t		vdev_initialize_action_time;	/* start and end time */
+	uint64_t	vdev_initialize_action_time;	/* start and end time */
 
 	/* TRIM related */
 	boolean_t	vdev_trim_exit_wanted;
@@ -296,15 +314,28 @@ struct vdev {
 	uint64_t	vdev_trim_rate;		/* requested rate (bytes/sec) */
 	uint64_t	vdev_trim_partial;	/* requested partial TRIM */
 	uint64_t	vdev_trim_secure;	/* requested secure TRIM */
-	time_t		vdev_trim_action_time;	/* start and end time */
+	uint64_t	vdev_trim_action_time;	/* start and end time */
 
-	/* for limiting outstanding I/Os (initialize and TRIM) */
+	/* Rebuild related */
+	boolean_t	vdev_rebuilding;
+	boolean_t	vdev_rebuild_exit_wanted;
+	boolean_t	vdev_rebuild_cancel_wanted;
+	boolean_t	vdev_rebuild_reset_wanted;
+	kmutex_t	vdev_rebuild_lock;
+	kcondvar_t	vdev_rebuild_cv;
+	kthread_t	*vdev_rebuild_thread;
+	vdev_rebuild_t	vdev_rebuild_config;
+
+	/* For limiting outstanding I/Os (initialize, TRIM, rebuild) */
 	kmutex_t	vdev_initialize_io_lock;
 	kcondvar_t	vdev_initialize_io_cv;
 	uint64_t	vdev_initialize_inflight;
 	kmutex_t	vdev_trim_io_lock;
 	kcondvar_t	vdev_trim_io_cv;
-	uint64_t	vdev_trim_inflight[2];
+	uint64_t	vdev_trim_inflight[3];
+	kmutex_t	vdev_rebuild_io_lock;
+	kcondvar_t	vdev_rebuild_io_cv;
+	uint64_t	vdev_rebuild_inflight;
 
 	/*
 	 * Values stored in the config for an indirect or removing vdev.
@@ -361,6 +392,7 @@ struct vdev {
 	uint64_t	vdev_degraded;	/* persistent degraded state	*/
 	uint64_t	vdev_removed;	/* persistent removed state	*/
 	uint64_t	vdev_resilver_txg; /* persistent resilvering state */
+	uint64_t	vdev_rebuild_txg; /* persistent rebuilding state */
 	uint64_t	vdev_nparity;	/* number of parity devices for raidz */
 	char		*vdev_path;	/* vdev path (if any)		*/
 	char		*vdev_devid;	/* vdev devid (if any)		*/
@@ -573,6 +605,14 @@ extern int vdev_obsolete_counts_are_precise(vdev_t *vd, boolean_t *are_precise);
  * Other miscellaneous functions
  */
 int vdev_checkpoint_sm_object(vdev_t *vd, uint64_t *sm_obj);
+
+/*
+ * Vdev ashift optimization tunables
+ */
+extern uint64_t zfs_vdev_min_auto_ashift;
+extern uint64_t zfs_vdev_max_auto_ashift;
+int param_set_min_auto_ashift(ZFS_MODULE_PARAM_ARGS);
+int param_set_max_auto_ashift(ZFS_MODULE_PARAM_ARGS);
 
 #ifdef	__cplusplus
 }

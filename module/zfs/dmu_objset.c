@@ -30,11 +30,12 @@
  * Copyright 2017 Nexenta Systems, Inc.
  * Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
  * Copyright (c) 2018, loli10K <ezomori.nozomu@gmail.com>. All rights reserved.
+ * Copyright (c) 2019, Klara Inc.
+ * Copyright (c) 2019, Allan Jude
  */
 
 /* Portions Copyright 2010 Robert Milkowski */
 
-#include <sys/zfeature.h>
 #include <sys/cred.h>
 #include <sys/zfs_context.h>
 #include <sys/dmu_objset.h>
@@ -193,8 +194,10 @@ compression_changed_cb(void *arg, uint64_t newval)
 	 */
 	ASSERT(newval != ZIO_COMPRESS_INHERIT);
 
-	os->os_compress = zio_compress_select(os->os_spa, newval,
-	    ZIO_COMPRESS_ON);
+	os->os_compress = zio_compress_select(os->os_spa,
+	    ZIO_COMPRESS_ALGO(newval), ZIO_COMPRESS_ON);
+	os->os_complevel = zio_complevel_select(os->os_spa, os->os_compress,
+	    ZIO_COMPRESS_LEVEL(newval), ZIO_COMPLEVEL_DEFAULT);
 }
 
 static void
@@ -392,7 +395,7 @@ dnode_hash(const objset_t *os, uint64_t obj)
 	return (crc);
 }
 
-unsigned int
+static unsigned int
 dnode_multilist_index_func(multilist_t *ml, void *obj)
 {
 	dnode_t *dn = obj;
@@ -413,6 +416,11 @@ dmu_objset_open_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 
 	ASSERT(ds == NULL || MUTEX_HELD(&ds->ds_opening_lock));
 	ASSERT(!BP_IS_REDACTED(bp));
+
+	/*
+	 * We need the pool config lock to get properties.
+	 */
+	ASSERT(ds == NULL || dsl_pool_config_held(ds->ds_dir->dd_pool));
 
 	/*
 	 * The $ORIGIN dataset (if it exists) doesn't have an associated
@@ -503,19 +511,7 @@ dmu_objset_open_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 	 * checksum/compression/copies.
 	 */
 	if (ds != NULL) {
-		boolean_t needlock = B_FALSE;
-
 		os->os_encrypted = (ds->ds_dir->dd_crypto_obj != 0);
-
-		/*
-		 * Note: it's valid to open the objset if the dataset is
-		 * long-held, in which case the pool_config lock will not
-		 * be held.
-		 */
-		if (!dsl_pool_config_held(dmu_objset_pool(os))) {
-			needlock = B_TRUE;
-			dsl_pool_config_enter(dmu_objset_pool(os), FTAG);
-		}
 
 		err = dsl_prop_register(ds,
 		    zfs_prop_to_name(ZFS_PROP_PRIMARYCACHE),
@@ -579,8 +575,6 @@ dmu_objset_open_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 				    smallblk_changed_cb, os);
 			}
 		}
-		if (needlock)
-			dsl_pool_config_exit(dmu_objset_pool(os), FTAG);
 		if (err != 0) {
 			arc_buf_destroy(os->os_phys_buf, &os->os_phys_buf);
 			kmem_free(os, sizeof (objset_t));
@@ -590,6 +584,7 @@ dmu_objset_open_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 		/* It's the meta-objset. */
 		os->os_checksum = ZIO_CHECKSUM_FLETCHER_4;
 		os->os_compress = ZIO_COMPRESS_ON;
+		os->os_complevel = ZIO_COMPLEVEL_DEFAULT;
 		os->os_encrypted = B_FALSE;
 		os->os_copies = spa_max_replication(spa);
 		os->os_dedup_checksum = ZIO_CHECKSUM_OFF;
@@ -650,11 +645,11 @@ dmu_objset_from_ds(dsl_dataset_t *ds, objset_t **osp)
 	int err = 0;
 
 	/*
-	 * We shouldn't be doing anything with dsl_dataset_t's unless the
-	 * pool_config lock is held, or the dataset is long-held.
+	 * We need the pool_config lock to manipulate the dsl_dataset_t.
+	 * Even if the dataset is long-held, we need the pool_config lock
+	 * to open the objset, as it needs to get properties.
 	 */
-	ASSERT(dsl_pool_config_held(ds->ds_dir->dd_pool) ||
-	    dsl_dataset_long_held(ds));
+	ASSERT(dsl_pool_config_held(ds->ds_dir->dd_pool));
 
 	mutex_enter(&ds->ds_opening_lock);
 	if (ds->ds_objset == NULL) {
@@ -1105,6 +1100,7 @@ dmu_objset_create_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 typedef struct dmu_objset_create_arg {
 	const char *doca_name;
 	cred_t *doca_cred;
+	proc_t *doca_proc;
 	void (*doca_userfunc)(objset_t *os, void *arg,
 	    cred_t *cr, dmu_tx_t *tx);
 	void *doca_userarg;
@@ -1149,7 +1145,7 @@ dmu_objset_create_check(void *arg, dmu_tx_t *tx)
 	}
 
 	error = dsl_fs_ss_limit_check(pdd, 1, ZFS_PROP_FILESYSTEM_LIMIT, NULL,
-	    doca->doca_cred);
+	    doca->doca_cred, doca->doca_proc);
 	if (error != 0) {
 		dsl_dir_rele(pdd, FTAG);
 		return (error);
@@ -1277,6 +1273,7 @@ dmu_objset_create(const char *name, dmu_objset_type_t type, uint64_t flags,
 
 	doca.doca_name = name;
 	doca.doca_cred = CRED();
+	doca.doca_proc = curproc;
 	doca.doca_flags = flags;
 	doca.doca_userfunc = func;
 	doca.doca_userarg = arg;
@@ -1305,6 +1302,7 @@ typedef struct dmu_objset_clone_arg {
 	const char *doca_clone;
 	const char *doca_origin;
 	cred_t *doca_cred;
+	proc_t *doca_proc;
 } dmu_objset_clone_arg_t;
 
 /*ARGSUSED*/
@@ -1333,7 +1331,7 @@ dmu_objset_clone_check(void *arg, dmu_tx_t *tx)
 	}
 
 	error = dsl_fs_ss_limit_check(pdd, 1, ZFS_PROP_FILESYSTEM_LIMIT, NULL,
-	    doca->doca_cred);
+	    doca->doca_cred, doca->doca_proc);
 	if (error != 0) {
 		dsl_dir_rele(pdd, FTAG);
 		return (SET_ERROR(EDQUOT));
@@ -1392,6 +1390,7 @@ dmu_objset_clone(const char *clone, const char *origin)
 	doca.doca_clone = clone;
 	doca.doca_origin = origin;
 	doca.doca_cred = CRED();
+	doca.doca_proc = curproc;
 
 	int rv = dsl_sync_task(clone,
 	    dmu_objset_clone_check, dmu_objset_clone_sync, &doca,
@@ -1411,7 +1410,7 @@ dmu_objset_snapshot_one(const char *fsname, const char *snapname)
 	nvlist_t *snaps = fnvlist_alloc();
 
 	fnvlist_add_boolean(snaps, longsnap);
-	strfree(longsnap);
+	kmem_strfree(longsnap);
 	err = dsl_dataset_snapshot(snaps, NULL, NULL);
 	fnvlist_free(snaps);
 	return (err);
@@ -1737,19 +1736,29 @@ dmu_objset_is_dirty(objset_t *os, uint64_t txg)
 	return (!multilist_is_empty(os->os_dirty_dnodes[txg & TXG_MASK]));
 }
 
-static objset_used_cb_t *used_cbs[DMU_OST_NUMTYPES];
+static file_info_cb_t *file_cbs[DMU_OST_NUMTYPES];
 
 void
-dmu_objset_register_type(dmu_objset_type_t ost, objset_used_cb_t *cb)
+dmu_objset_register_type(dmu_objset_type_t ost, file_info_cb_t *cb)
 {
-	used_cbs[ost] = cb;
+	file_cbs[ost] = cb;
+}
+
+int
+dmu_get_file_info(objset_t *os, dmu_object_type_t bonustype, const void *data,
+    zfs_file_info_t *zfi)
+{
+	file_info_cb_t *cb = file_cbs[os->os_phys->os_type];
+	if (cb == NULL)
+		return (EINVAL);
+	return (cb(bonustype, data, zfi));
 }
 
 boolean_t
 dmu_objset_userused_enabled(objset_t *os)
 {
 	return (spa_version(os->os_spa) >= SPA_VERSION_USERSPACE &&
-	    used_cbs[os->os_phys->os_type] != NULL &&
+	    file_cbs[os->os_phys->os_type] != NULL &&
 	    DMU_USERUSED_DNODE(os) != NULL);
 }
 
@@ -1763,7 +1772,7 @@ dmu_objset_userobjused_enabled(objset_t *os)
 boolean_t
 dmu_objset_projectquota_enabled(objset_t *os)
 {
-	return (used_cbs[os->os_phys->os_type] != NULL &&
+	return (file_cbs[os->os_phys->os_type] != NULL &&
 	    DMU_PROJECTUSED_DNODE(os) != NULL &&
 	    spa_feature_is_enabled(os->os_spa, SPA_FEATURE_PROJECT_QUOTA));
 }
@@ -1879,14 +1888,15 @@ do_userquota_update(objset_t *os, userquota_cache_t *cache, uint64_t used,
 		if (subtract)
 			delta = -delta;
 
-		(void) sprintf(name, "%llx", (longlong_t)user);
+		(void) snprintf(name, sizeof (name), "%llx", (longlong_t)user);
 		userquota_update_cache(&cache->uqc_user_deltas, name, delta);
 
-		(void) sprintf(name, "%llx", (longlong_t)group);
+		(void) snprintf(name, sizeof (name), "%llx", (longlong_t)group);
 		userquota_update_cache(&cache->uqc_group_deltas, name, delta);
 
 		if (dmu_objset_projectquota_enabled(os)) {
-			(void) sprintf(name, "%llx", (longlong_t)project);
+			(void) snprintf(name, sizeof (name), "%llx",
+			    (longlong_t)project);
 			userquota_update_cache(&cache->uqc_project_deltas,
 			    name, delta);
 		}
@@ -2063,15 +2073,13 @@ dmu_objset_do_userquota_updates(objset_t *os, dmu_tx_t *tx)
 static void *
 dmu_objset_userquota_find_data(dmu_buf_impl_t *db, dmu_tx_t *tx)
 {
-	dbuf_dirty_record_t *dr, **drp;
+	dbuf_dirty_record_t *dr;
 	void *data;
 
 	if (db->db_dirtycnt == 0)
 		return (db->db.db_data);  /* Nothing is changing */
 
-	for (drp = &db->db_last_dirty; (dr = *drp) != NULL; drp = &dr->dr_next)
-		if (dr->dr_txg == tx->tx_txg)
-			break;
+	dr = dbuf_find_dirty_eq(db, tx->tx_txg);
 
 	if (dr == NULL) {
 		data = NULL;
@@ -2099,9 +2107,6 @@ dmu_objset_userquota_get_ids(dnode_t *dn, boolean_t before, dmu_tx_t *tx)
 	objset_t *os = dn->dn_objset;
 	void *data = NULL;
 	dmu_buf_impl_t *db = NULL;
-	uint64_t *user = NULL;
-	uint64_t *group = NULL;
-	uint64_t *project = NULL;
 	int flags = dn->dn_id_flags;
 	int error;
 	boolean_t have_spill = B_FALSE;
@@ -2155,23 +2160,23 @@ dmu_objset_userquota_get_ids(dnode_t *dn, boolean_t before, dmu_tx_t *tx)
 		return;
 	}
 
-	if (before) {
-		ASSERT(data);
-		user = &dn->dn_olduid;
-		group = &dn->dn_oldgid;
-		project = &dn->dn_oldprojid;
-	} else if (data) {
-		user = &dn->dn_newuid;
-		group = &dn->dn_newgid;
-		project = &dn->dn_newprojid;
-	}
-
 	/*
 	 * Must always call the callback in case the object
 	 * type has changed and that type isn't an object type to track
 	 */
-	error = used_cbs[os->os_phys->os_type](dn->dn_bonustype, data,
-	    user, group, project);
+	zfs_file_info_t zfi;
+	error = file_cbs[os->os_phys->os_type](dn->dn_bonustype, data, &zfi);
+
+	if (before) {
+		ASSERT(data);
+		dn->dn_olduid = zfi.zfi_user;
+		dn->dn_oldgid = zfi.zfi_group;
+		dn->dn_oldprojid = zfi.zfi_project;
+	} else if (data) {
+		dn->dn_newuid = zfi.zfi_user;
+		dn->dn_newgid = zfi.zfi_group;
+		dn->dn_newprojid = zfi.zfi_project;
+	}
 
 	/*
 	 * Preserve existing uid/gid when the callback can't determine
@@ -2449,7 +2454,7 @@ dmu_snapshot_list_next(objset_t *os, int namelen, char *name,
 		return (SET_ERROR(ENAMETOOLONG));
 	}
 
-	(void) strcpy(name, attr.za_name);
+	(void) strlcpy(name, attr.za_name, namelen);
 	if (idp)
 		*idp = attr.za_first_integer;
 	if (case_conflict)
@@ -2494,7 +2499,7 @@ dmu_dir_list_next(objset_t *os, int namelen, char *name,
 		return (SET_ERROR(ENAMETOOLONG));
 	}
 
-	(void) strcpy(name, attr.za_name);
+	(void) strlcpy(name, attr.za_name, namelen);
 	if (idp)
 		*idp = attr.za_first_integer;
 	zap_cursor_advance(&cursor);
@@ -2801,7 +2806,7 @@ dmu_objset_find_impl(spa_t *spa, const char *name,
 			err = dmu_objset_find_impl(spa, child,
 			    func, arg, flags);
 			dsl_pool_config_enter(dp, FTAG);
-			strfree(child);
+			kmem_strfree(child);
 			if (err != 0)
 				break;
 		}
@@ -2839,7 +2844,7 @@ dmu_objset_find_impl(spa_t *spa, const char *name,
 				dsl_pool_config_exit(dp, FTAG);
 				err = func(child, arg);
 				dsl_pool_config_enter(dp, FTAG);
-				strfree(child);
+				kmem_strfree(child);
 				if (err != 0)
 					break;
 			}
@@ -2862,7 +2867,7 @@ dmu_objset_find_impl(spa_t *spa, const char *name,
  * See comment above dmu_objset_find_impl().
  */
 int
-dmu_objset_find(char *name, int func(const char *, void *), void *arg,
+dmu_objset_find(const char *name, int func(const char *, void *), void *arg,
     int flags)
 {
 	spa_t *spa;

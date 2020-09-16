@@ -36,6 +36,7 @@
 #include <sys/spa_checkpoint.h>
 #include <sys/spa_log_spacemap.h>
 #include <sys/vdev.h>
+#include <sys/vdev_rebuild.h>
 #include <sys/vdev_removal.h>
 #include <sys/metaslab.h>
 #include <sys/dmu.h>
@@ -43,7 +44,7 @@
 #include <sys/uberblock_impl.h>
 #include <sys/zfs_context.h>
 #include <sys/avl.h>
-#include <sys/refcount.h>
+#include <sys/zfs_refcount.h>
 #include <sys/bplist.h>
 #include <sys/bpobj.h>
 #include <sys/dsl_crypt.h>
@@ -216,6 +217,7 @@ struct spa {
 	spa_load_state_t spa_load_state;	/* current load operation */
 	boolean_t	spa_indirect_vdevs_loaded; /* mappings loaded? */
 	boolean_t	spa_trust_config;	/* do we trust vdev tree? */
+	boolean_t	spa_is_splitting;	/* in the middle of a split? */
 	spa_config_source_t spa_config_source;	/* where config comes from? */
 	uint64_t	spa_import_flags;	/* import specific flags */
 	spa_taskqs_t	spa_zio_taskq[ZIO_TYPES][ZIO_TASKQ_TYPES];
@@ -363,7 +365,7 @@ struct spa {
 	uint8_t		spa_claiming;		/* pool is doing zil_claim() */
 	boolean_t	spa_is_root;		/* pool is root */
 	int		spa_minref;		/* num refs when first opened */
-	int		spa_mode;		/* FREAD | FWRITE */
+	spa_mode_t	spa_mode;		/* SPA_MODE_{READ|WRITE} */
 	spa_log_state_t spa_log_state;		/* log state */
 	uint64_t	spa_autoexpand;		/* lun expansion on/off */
 	ddt_t		*spa_ddt[ZIO_CHECKSUM_FUNCTIONS]; /* in-core DDTs */
@@ -434,7 +436,8 @@ struct spa {
 };
 
 extern char *spa_config_path;
-
+extern char *zfs_deadman_failmode;
+extern int spa_slop_shift;
 extern void spa_taskq_dispatch_ent(spa_t *spa, zio_type_t t, zio_taskq_type_t q,
     task_func_t *func, void *arg, uint_t flags, taskq_ent_t *ent);
 extern void spa_taskq_dispatch_sync(spa_t *, zio_type_t t, zio_taskq_type_t q,
@@ -444,7 +447,10 @@ extern void spa_load_l2cache(spa_t *spa);
 extern sysevent_t *spa_event_create(spa_t *spa, vdev_t *vd, nvlist_t *hist_nvl,
     const char *name);
 extern void spa_event_post(sysevent_t *ev);
-
+extern int param_set_deadman_failmode_common(const char *val);
+extern void spa_set_deadman_synctime(hrtime_t ns);
+extern void spa_set_deadman_ziotime(hrtime_t ns);
+extern const char *spa_history_zone(void);
 
 #ifdef	__cplusplus
 }

@@ -53,6 +53,8 @@ enum scope_prefix_types {
 	zfs_condense,
 	zfs_dbuf,
 	zfs_dbuf_cache,
+	zfs_deadman,
+	zfs_dedup,
 	zfs_l2arc,
 	zfs_livelist,
 	zfs_livelist_condense,
@@ -66,36 +68,38 @@ enum scope_prefix_types {
 	zfs_send,
 	zfs_spa,
 	zfs_trim,
+	zfs_txg,
 	zfs_vdev,
 	zfs_vdev_cache,
 	zfs_vdev_mirror,
+	zfs_zevent,
 	zfs_zio,
-	zfs_zil,
+	zfs_zil
 };
 
 /*
  * Declare a module parameter / sysctl node
  *
- * scope_prefix the part of the the sysctl / sysfs tree the node resides under
+ * "scope_prefix" the part of the the sysctl / sysfs tree the node resides under
  *   (currently a no-op on Linux)
- * name_prefix the part of the variable name that will be excluded from the
+ * "name_prefix" the part of the variable name that will be excluded from the
  *   exported names on platforms with a hierarchical namespace
- * name the part of the variable that will be exposed on platforms with a
+ * "name" the part of the variable that will be exposed on platforms with a
  *    hierarchical namespace, or as name_prefix ## name on Linux
- * type the variable type
- * perm the permissions (read/write or read only)
- * desc a brief description of the option
+ * "type" the variable type
+ * "perm" the permissions (read/write or read only)
+ * "desc" a brief description of the option
  *
  * Examples:
  * ZFS_MODULE_PARAM(zfs_vdev_mirror, zfs_vdev_mirror_, rotating_inc, UINT,
- *	 ZMOD_RW, "Rotating media load increment for non-seeking I/O's");
+ * 	ZMOD_RW, "Rotating media load increment for non-seeking I/O's");
  * on FreeBSD:
  *   vfs.zfs.vdev.mirror.rotating_inc
  * on Linux:
  *   zfs_vdev_mirror_rotating_inc
  *
- * *ZFS_MODULE_PARAM(zfs, , dmu_prefetch_max, UINT, ZMOD_RW,
- *	"Limit one prefetch call to this size");
+ * ZFS_MODULE_PARAM(zfs, , dmu_prefetch_max, UINT, ZMOD_RW,
+ * 	"Limit one prefetch call to this size");
  * on FreeBSD:
  *   vfs.zfs.dmu_prefetch_max
  * on Linux:
@@ -108,5 +112,40 @@ enum scope_prefix_types {
 	MODULE_PARM_DESC(name_prefix ## name, desc)
 /* END CSTYLED */
 
+/*
+ * Declare a module parameter / sysctl node
+ *
+ * "scope_prefix" the part of the the sysctl / sysfs tree the node resides under
+ *   (currently a no-op on Linux)
+ * "name_prefix" the part of the variable name that will be excluded from the
+ *   exported names on platforms with a hierarchical namespace
+ * "name" the part of the variable that will be exposed on platforms with a
+ *    hierarchical namespace, or as name_prefix ## name on Linux
+ * "setfunc" setter function
+ * "getfunc" getter function
+ * "perm" the permissions (read/write or read only)
+ * "desc" a brief description of the option
+ *
+ * Examples:
+ * ZFS_MODULE_PARAM_CALL(zfs_spa, spa_, slop_shift, param_set_slop_shift,
+ * 	param_get_int, ZMOD_RW, "Reserved free space in pool");
+ * on FreeBSD:
+ *   vfs.zfs.spa_slop_shift
+ * on Linux:
+ *   spa_slop_shift
+ */
+/* BEGIN CSTYLED */
+#define	ZFS_MODULE_PARAM_CALL(scope_prefix, name_prefix, name, setfunc, getfunc, perm, desc) \
+	CTASSERT_GLOBAL((sizeof (scope_prefix) == sizeof (enum scope_prefix_types))); \
+	module_param_call(name_prefix ## name, setfunc, getfunc, &name_prefix ## name, perm); \
+	MODULE_PARM_DESC(name_prefix ## name, desc)
+/* END CSTYLED */
+
+#define	ZFS_MODULE_PARAM_ARGS	const char *buf, zfs_kernel_param_t *kp
+
+#define	ZFS_MODULE_DESCRIPTION(s) MODULE_DESCRIPTION(s)
+#define	ZFS_MODULE_AUTHOR(s) MODULE_AUTHOR(s)
+#define	ZFS_MODULE_LICENSE(s) MODULE_LICENSE(s)
+#define	ZFS_MODULE_VERSION(s) MODULE_VERSION(s)
 
 #endif	/* _MOD_COMPAT_H */

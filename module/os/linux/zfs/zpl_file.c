@@ -29,11 +29,16 @@
 #endif
 #include <sys/file.h>
 #include <sys/dmu_objset.h>
+#include <sys/zfs_znode.h>
 #include <sys/zfs_vfsops.h>
 #include <sys/zfs_vnops.h>
-#include <sys/zfs_znode.h>
 #include <sys/zfs_project.h>
 
+/*
+ * When using fallocate(2) to preallocate space, inflate the requested
+ * capacity check by 10% to account for the required metadata blocks.
+ */
+unsigned int zfs_fallocate_reserve_percent = 110;
 
 static int
 zpl_open(struct inode *ip, struct file *filp)
@@ -125,7 +130,7 @@ zpl_fsync(struct file *filp, int datasync)
 
 	crhold(cr);
 	cookie = spl_fstrans_mark();
-	error = -zfs_fsync(inode, datasync, cr);
+	error = -zfs_fsync(ITOZ(inode), datasync, cr);
 	spl_fstrans_unmark(cookie);
 	crfree(cr);
 	ASSERT3S(error, <=, 0);
@@ -163,7 +168,7 @@ zpl_fsync(struct file *filp, loff_t start, loff_t end, int datasync)
 
 	crhold(cr);
 	cookie = spl_fstrans_mark();
-	error = -zfs_fsync(inode, datasync, cr);
+	error = -zfs_fsync(ITOZ(inode), datasync, cr);
 	spl_fstrans_unmark(cookie);
 	crfree(cr);
 	ASSERT3S(error, <=, 0);
@@ -190,19 +195,19 @@ zfs_io_flags(struct kiocb *kiocb)
 
 #if defined(IOCB_DSYNC)
 	if (kiocb->ki_flags & IOCB_DSYNC)
-		flags |= FDSYNC;
+		flags |= O_DSYNC;
 #endif
 #if defined(IOCB_SYNC)
 	if (kiocb->ki_flags & IOCB_SYNC)
-		flags |= FSYNC;
+		flags |= O_SYNC;
 #endif
 #if defined(IOCB_APPEND)
 	if (kiocb->ki_flags & IOCB_APPEND)
-		flags |= FAPPEND;
+		flags |= O_APPEND;
 #endif
 #if defined(IOCB_DIRECT)
 	if (kiocb->ki_flags & IOCB_DIRECT)
-		flags |= FDIRECT;
+		flags |= O_DIRECT;
 #endif
 	return (flags);
 }
@@ -646,7 +651,7 @@ zpl_readpages(struct file *filp, struct address_space *mapping,
 	    (filler_t *)zpl_readpage, filp));
 }
 
-int
+static int
 zpl_putpage(struct page *pp, struct writeback_control *wbc, void *data)
 {
 	struct address_space *mapping = data;
@@ -721,23 +726,24 @@ zpl_writepage(struct page *pp, struct writeback_control *wbc)
 }
 
 /*
- * The only flag combination which matches the behavior of zfs_space()
- * is FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE.  The FALLOC_FL_PUNCH_HOLE
+ * The flag combination which matches the behavior of zfs_space() is
+ * FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE.  The FALLOC_FL_PUNCH_HOLE
  * flag was introduced in the 2.6.38 kernel.
+ *
+ * The original mode=0 (allocate space) behavior can be reasonably emulated
+ * by checking if enough space exists and creating a sparse file, as real
+ * persistent space reservation is not possible due to COW, snapshots, etc.
  */
 static long
 zpl_fallocate_common(struct inode *ip, int mode, loff_t offset, loff_t len)
 {
-	int error = -EOPNOTSUPP;
-
-#if defined(FALLOC_FL_PUNCH_HOLE) && defined(FALLOC_FL_KEEP_SIZE)
 	cred_t *cr = CRED();
-	flock64_t bf;
 	loff_t olen;
 	fstrans_cookie_t cookie;
+	int error = 0;
 
-	if (mode != (FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
-		return (error);
+	if ((mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE)) != 0)
+		return (-EOPNOTSUPP);
 
 	if (offset < 0 || len <= 0)
 		return (-EINVAL);
@@ -745,28 +751,59 @@ zpl_fallocate_common(struct inode *ip, int mode, loff_t offset, loff_t len)
 	spl_inode_lock(ip);
 	olen = i_size_read(ip);
 
-	if (offset > olen) {
-		spl_inode_unlock(ip);
-		return (0);
-	}
-	if (offset + len > olen)
-		len = olen - offset;
-	bf.l_type = F_WRLCK;
-	bf.l_whence = SEEK_SET;
-	bf.l_start = offset;
-	bf.l_len = len;
-	bf.l_pid = 0;
-
 	crhold(cr);
 	cookie = spl_fstrans_mark();
-	error = -zfs_space(ip, F_FREESP, &bf, FWRITE, offset, cr);
+	if (mode & FALLOC_FL_PUNCH_HOLE) {
+		flock64_t bf;
+
+		if (offset > olen)
+			goto out_unmark;
+
+		if (offset + len > olen)
+			len = olen - offset;
+		bf.l_type = F_WRLCK;
+		bf.l_whence = SEEK_SET;
+		bf.l_start = offset;
+		bf.l_len = len;
+		bf.l_pid = 0;
+
+		error = -zfs_space(ITOZ(ip), F_FREESP, &bf, O_RDWR, offset, cr);
+	} else if ((mode & ~FALLOC_FL_KEEP_SIZE) == 0) {
+		unsigned int percent = zfs_fallocate_reserve_percent;
+		struct kstatfs statfs;
+
+		/* Legacy mode, disable fallocate compatibility. */
+		if (percent == 0) {
+			error = -EOPNOTSUPP;
+			goto out_unmark;
+		}
+
+		/*
+		 * Use zfs_statvfs() instead of dmu_objset_space() since it
+		 * also checks project quota limits, which are relevant here.
+		 */
+		error = zfs_statvfs(ip, &statfs);
+		if (error)
+			goto out_unmark;
+
+		/*
+		 * Shrink available space a bit to account for overhead/races.
+		 * We know the product previously fit into availbytes from
+		 * dmu_objset_space(), so the smaller product will also fit.
+		 */
+		if (len > statfs.f_bavail * (statfs.f_bsize * 100 / percent)) {
+			error = -ENOSPC;
+			goto out_unmark;
+		}
+		if (!(mode & FALLOC_FL_KEEP_SIZE) && offset + len > olen)
+			error = zfs_freesp(ITOZ(ip), offset + len, 0, 0, FALSE);
+	}
+out_unmark:
 	spl_fstrans_unmark(cookie);
 	spl_inode_unlock(ip);
 
 	crfree(cr);
-#endif /* defined(FALLOC_FL_PUNCH_HOLE) && defined(FALLOC_FL_KEEP_SIZE) */
 
-	ASSERT3S(error, <=, 0);
 	return (error);
 }
 
@@ -890,7 +927,7 @@ zpl_ioctl_setflags(struct file *filp, void __user *arg)
 
 	crhold(cr);
 	cookie = spl_fstrans_mark();
-	err = -zfs_setattr(ip, (vattr_t *)&xva, 0, cr);
+	err = -zfs_setattr(ITOZ(ip), (vattr_t *)&xva, 0, cr);
 	spl_fstrans_unmark(cookie);
 	crfree(cr);
 
@@ -938,7 +975,7 @@ zpl_ioctl_setxattr(struct file *filp, void __user *arg)
 
 	crhold(cr);
 	cookie = spl_fstrans_mark();
-	err = -zfs_setattr(ip, (vattr_t *)&xva, 0, cr);
+	err = -zfs_setattr(ITOZ(ip), (vattr_t *)&xva, 0, cr);
 	spl_fstrans_unmark(cookie);
 	crfree(cr);
 
@@ -1068,3 +1105,9 @@ const struct file_operations zpl_dir_file_operations = {
 	.compat_ioctl   = zpl_compat_ioctl,
 #endif
 };
+
+/* BEGIN CSTYLED */
+module_param(zfs_fallocate_reserve_percent, uint, 0644);
+MODULE_PARM_DESC(zfs_fallocate_reserve_percent,
+    "Percentage of length to use for the available capacity check");
+/* END CSTYLED */

@@ -282,10 +282,11 @@ vdev_mirror_map_init(zio_t *zio)
 		}
 
 		/*
-		 * If we do not trust the pool config, some DVAs might be
-		 * invalid or point to vdevs that do not exist. We skip them.
+		 * If the pool cannot be written to, then infer that some
+		 * DVAs might be invalid or point to vdevs that do not exist.
+		 * We skip them.
 		 */
-		if (!spa_trust_config(spa)) {
+		if (!spa_writeable(spa)) {
 			ASSERT3U(zio->io_type, ==, ZIO_TYPE_READ);
 			int j = 0;
 			for (int i = 0; i < c; i++) {
@@ -309,6 +310,13 @@ vdev_mirror_map_init(zio_t *zio)
 
 			mc->mc_vd = vdev_lookup_top(spa, DVA_GET_VDEV(&dva[c]));
 			mc->mc_offset = DVA_GET_OFFSET(&dva[c]);
+			if (mc->mc_vd == NULL) {
+				kmem_free(mm, vdev_mirror_map_size(
+				    mm->mm_children));
+				zio->io_vsd = NULL;
+				zio->io_error = ENXIO;
+				return (NULL);
+			}
 		}
 	} else {
 		/*
@@ -358,7 +366,7 @@ vdev_mirror_map_init(zio_t *zio)
 
 static int
 vdev_mirror_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
-    uint64_t *ashift)
+    uint64_t *logical_ashift, uint64_t *physical_ashift)
 {
 	int numerrors = 0;
 	int lasterror = 0;
@@ -381,7 +389,9 @@ vdev_mirror_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
 
 		*asize = MIN(*asize - 1, cvd->vdev_asize - 1) + 1;
 		*max_asize = MIN(*max_asize - 1, cvd->vdev_max_asize - 1) + 1;
-		*ashift = MAX(*ashift, cvd->vdev_ashift);
+		*logical_ashift = MAX(*logical_ashift, cvd->vdev_ashift);
+		*physical_ashift = MAX(*physical_ashift,
+		    vd->vdev_physical_ashift);
 	}
 
 	if (numerrors == vd->vdev_children) {
@@ -759,8 +769,9 @@ vdev_mirror_io_done(zio_t *zio)
 
 			zio_nowait(zio_vdev_child_io(zio, zio->io_bp,
 			    mc->mc_vd, mc->mc_offset,
-			    zio->io_abd, zio->io_size,
-			    ZIO_TYPE_WRITE, ZIO_PRIORITY_ASYNC_WRITE,
+			    zio->io_abd, zio->io_size, ZIO_TYPE_WRITE,
+			    zio->io_priority == ZIO_PRIORITY_REBUILD ?
+			    ZIO_PRIORITY_REBUILD : ZIO_PRIORITY_ASYNC_WRITE,
 			    ZIO_FLAG_IO_REPAIR | (unexpected_errors ?
 			    ZIO_FLAG_SELF_HEAL : 0), NULL, NULL));
 		}

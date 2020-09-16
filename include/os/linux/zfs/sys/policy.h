@@ -48,10 +48,11 @@ int secpolicy_vnode_setid_retain(const cred_t *, boolean_t);
 int secpolicy_vnode_setids_setgids(const cred_t *, gid_t);
 int secpolicy_zinject(const cred_t *);
 int secpolicy_zfs(const cred_t *);
+int secpolicy_zfs_proc(const cred_t *, proc_t *);
 void secpolicy_setid_clear(vattr_t *, cred_t *);
 int secpolicy_setid_setsticky_clear(struct inode *, vattr_t *,
     const vattr_t *, cred_t *);
-int secpolicy_xvattr(xvattr_t *, uid_t, cred_t *, vtype_t);
+int secpolicy_xvattr(xvattr_t *, uid_t, cred_t *, mode_t);
 int secpolicy_vnode_setattr(cred_t *, struct inode *, struct vattr *,
     const struct vattr *, int, int (void *, int, cred_t *), void *);
 int secpolicy_basic_link(const cred_t *);

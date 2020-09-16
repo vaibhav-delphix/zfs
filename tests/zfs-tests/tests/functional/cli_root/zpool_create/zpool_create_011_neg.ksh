@@ -113,7 +113,7 @@ done
 # now destroy the pool to be polite
 log_must zpool destroy -f $TESTPOOL
 
-if ! is_linux; then
+if is_illumos; then
 	# create/destroy a pool as a simple way to set the partitioning
 	# back to something normal so we can use this $disk as a dump device
 	log_must zpool create -f $TESTPOOL3 $DISK1

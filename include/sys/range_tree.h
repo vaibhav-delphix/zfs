@@ -126,11 +126,11 @@ rs_get_start_raw(const range_seg_t *rs, const range_tree_t *rt)
 	ASSERT3U(rt->rt_type, <=, RANGE_SEG_NUM_TYPES);
 	switch (rt->rt_type) {
 	case RANGE_SEG32:
-		return (((range_seg32_t *)rs)->rs_start);
+		return (((const range_seg32_t *)rs)->rs_start);
 	case RANGE_SEG64:
-		return (((range_seg64_t *)rs)->rs_start);
+		return (((const range_seg64_t *)rs)->rs_start);
 	case RANGE_SEG_GAP:
-		return (((range_seg_gap_t *)rs)->rs_start);
+		return (((const range_seg_gap_t *)rs)->rs_start);
 	default:
 		VERIFY(0);
 		return (0);
@@ -143,11 +143,11 @@ rs_get_end_raw(const range_seg_t *rs, const range_tree_t *rt)
 	ASSERT3U(rt->rt_type, <=, RANGE_SEG_NUM_TYPES);
 	switch (rt->rt_type) {
 	case RANGE_SEG32:
-		return (((range_seg32_t *)rs)->rs_end);
+		return (((const range_seg32_t *)rs)->rs_end);
 	case RANGE_SEG64:
-		return (((range_seg64_t *)rs)->rs_end);
+		return (((const range_seg64_t *)rs)->rs_end);
 	case RANGE_SEG_GAP:
-		return (((range_seg_gap_t *)rs)->rs_end);
+		return (((const range_seg_gap_t *)rs)->rs_end);
 	default:
 		VERIFY(0);
 		return (0);
@@ -160,15 +160,15 @@ rs_get_fill_raw(const range_seg_t *rs, const range_tree_t *rt)
 	ASSERT3U(rt->rt_type, <=, RANGE_SEG_NUM_TYPES);
 	switch (rt->rt_type) {
 	case RANGE_SEG32: {
-		const range_seg32_t *r32 = rs;
+		const range_seg32_t *r32 = (const range_seg32_t *)rs;
 		return (r32->rs_end - r32->rs_start);
 	}
 	case RANGE_SEG64: {
-		const range_seg64_t *r64 = rs;
+		const range_seg64_t *r64 = (const range_seg64_t *)rs;
 		return (r64->rs_end - r64->rs_start);
 	}
 	case RANGE_SEG_GAP:
-		return (((range_seg_gap_t *)rs)->rs_fill);
+		return (((const range_seg_gap_t *)rs)->rs_fill);
 	default:
 		VERIFY(0);
 		return (0);

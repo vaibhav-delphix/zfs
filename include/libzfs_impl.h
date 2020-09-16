@@ -1,5 +1,5 @@
 /*
- * CDDL HEADER SART
+ * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
  * Common Development and Distribution License (the "License").
@@ -23,6 +23,7 @@
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2011, 2020 by Delphix. All rights reserved.
  * Copyright (c) 2018 Datto Inc.
+ * Copyright 2020 Joyent, Inc.
  */
 
 #ifndef	_LIBZFS_IMPL_H
@@ -33,6 +34,7 @@
 #include <sys/nvpair.h>
 #include <sys/dmu.h>
 #include <sys/zfs_ioctl.h>
+#include <regex.h>
 
 #include <libuutil.h>
 #include <libzfs.h>
@@ -68,6 +70,8 @@ struct libzfs_handle {
 	int libzfs_pool_iter;
 	char libzfs_chassis_id[256];
 	boolean_t libzfs_prop_debug;
+	regex_t libzfs_urire;
+	uint64_t libzfs_max_nvlist;
 };
 
 struct zfs_handle {
@@ -119,6 +123,14 @@ typedef enum {
 	SHARED_SMB = 0x4
 } zfs_share_type_t;
 
+typedef int (*zfs_uri_handler_fn_t)(struct libzfs_handle *, const char *,
+    const char *, zfs_keyformat_t, boolean_t, uint8_t **, size_t *);
+
+typedef struct zfs_uri_handler {
+	const char *zuh_scheme;
+	zfs_uri_handler_fn_t zuh_handler;
+} zfs_uri_handler_t;
+
 #define	CONFIG_BUF_MINSIZE	262144
 
 int zfs_error(libzfs_handle_t *, int, const char *);
@@ -132,6 +144,7 @@ int no_memory(libzfs_handle_t *);
 
 int zfs_standard_error(libzfs_handle_t *, int, const char *);
 int zfs_standard_error_fmt(libzfs_handle_t *, int, const char *, ...);
+void zfs_setprop_error(libzfs_handle_t *, zfs_prop_t, int, char *);
 int zpool_standard_error(libzfs_handle_t *, int, const char *);
 int zpool_standard_error_fmt(libzfs_handle_t *, int, const char *, ...);
 
@@ -153,6 +166,10 @@ int zprop_expand_list(libzfs_handle_t *hdl, zprop_list_t **plp,
  * changelist_gather() flag to force it to iterate on mounted datasets only
  */
 #define	CL_GATHER_ITER_MOUNTED	2
+/*
+ * Use this changelist_gather() flag to prevent unmounting of file systems.
+ */
+#define	CL_GATHER_DONT_UNMOUNT	4
 
 typedef struct prop_changelist prop_changelist_t;
 
@@ -193,6 +210,53 @@ extern int zfs_parse_options(char *, zfs_share_proto_t);
 
 extern int zfs_unshare_proto(zfs_handle_t *,
     const char *, zfs_share_proto_t *);
+
+typedef struct {
+	zfs_prop_t p_prop;
+	char *p_name;
+	int p_share_err;
+	int p_unshare_err;
+} proto_table_t;
+
+typedef struct differ_info {
+	zfs_handle_t *zhp;
+	char *fromsnap;
+	char *frommnt;
+	char *tosnap;
+	char *tomnt;
+	char *ds;
+	char *dsmnt;
+	char *tmpsnap;
+	char errbuf[1024];
+	boolean_t isclone;
+	boolean_t scripted;
+	boolean_t classify;
+	boolean_t timestamped;
+	uint64_t shares;
+	int zerr;
+	int cleanupfd;
+	int outputfd;
+	int datafd;
+} differ_info_t;
+
+extern proto_table_t proto_table[PROTO_END];
+
+extern int do_mount(zfs_handle_t *zhp, const char *mntpt, char *opts,
+    int flags);
+extern int do_unmount(const char *mntpt, int flags);
+extern int zfs_mount_delegation_check(void);
+extern int zfs_share_proto(zfs_handle_t *zhp, zfs_share_proto_t *proto);
+extern int unshare_one(libzfs_handle_t *hdl, const char *name,
+    const char *mountpoint, zfs_share_proto_t proto);
+extern boolean_t zfs_is_mountable(zfs_handle_t *zhp, char *buf, size_t buflen,
+    zprop_source_t *source, int flags);
+extern zfs_share_type_t is_shared(const char *mountpoint,
+    zfs_share_proto_t proto);
+extern int libzfs_load_module(void);
+extern int zpool_relabel_disk(libzfs_handle_t *hdl, const char *path,
+    const char *msg);
+extern int find_shares_object(differ_info_t *di);
+extern void libzfs_set_pipe_max(int infd);
 extern void zfs_commit_proto(zfs_share_proto_t *);
 
 #ifdef	__cplusplus

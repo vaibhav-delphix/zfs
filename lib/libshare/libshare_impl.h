@@ -36,7 +36,8 @@ typedef struct sa_share_impl {
 	sa_share_fsinfo_t *sa_fsinfo; /* per-fstype information */
 } *sa_share_impl_t;
 
-#define	FSINFO(impl_share, fstype) (&(impl_share->sa_fsinfo[fstype->fsinfo_index]))
+#define	FSINFO(impl_share, fstype) \
+	(&(impl_share->sa_fsinfo[fstype->fsinfo_index]))
 
 typedef struct sa_share_ops {
 	int (*enable_share)(sa_share_impl_t share);

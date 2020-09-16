@@ -74,12 +74,35 @@ function block_device_wait
 {
 	if is_linux; then
 		udevadm trigger $*
-		typeset local start=$SECONDS
+		typeset start=$SECONDS
 		udevadm settle
-		typeset local elapsed=$((SECONDS - start))
+		typeset elapsed=$((SECONDS - start))
 		[[ $elapsed > 60 ]] && \
 		    log_note udevadm settle time too long: $elapsed
+	elif is_freebsd; then
+		if [[ ${#@} -eq 0 ]]; then
+			# Do something that has to go through the geom event
+			# queue to complete.
+			sysctl kern.geom.conftxt >/dev/null
+			return
+		fi
 	fi
+	# Poll for the given paths to appear, but give up eventually.
+	typeset -i i
+	for (( i = 0; i < 5; ++i )); do
+		typeset missing=false
+		typeset dev
+		for dev in "${@}"; do
+			if ! [[ -f $dev ]]; then
+				missing=true
+				break
+			fi
+		done
+		if ! $missing; then
+			break
+		fi
+		sleep ${#@}
+	done
 }
 
 #
@@ -91,8 +114,18 @@ function is_physical_device #device
 	device=${device#$DEV_RDSKDIR/}
 
 	if is_linux; then
-		[[ -b "$DEV_DSKDIR/$device" ]] && \
+		is_disk_device "$DEV_DSKDIR/$device" && \
 		[[ -f /sys/module/loop/parameters/max_part ]]
+		return $?
+	elif is_freebsd; then
+		is_disk_device "$DEV_DSKDIR/$device" && \
+		echo $device | egrep -q \
+		    -e '^a?da[0-9]+$' \
+		    -e '^md[0-9]+$' \
+		    -e '^mfid[0-9]+$' \
+		    -e '^nda[0-9]+$' \
+		    -e '^nvd[0-9]+$' \
+		    -e '^vtbd[0-9]+$'
 		return $?
 	else
 		echo $device | egrep "^c[0-F]+([td][0-F]+)+$" > /dev/null 2>&1
@@ -131,9 +164,16 @@ function is_loop_device #disk
 }
 
 #
+# Linux:
 # Check if the given device is a multipath device and if there is a symbolic
 # link to a device mapper and to a disk
 # Currently no support for dm devices alone without multipath
+#
+# FreeBSD:
+# Check if the given device is a gmultipath device.
+#
+# Others:
+# No multipath detection.
 #
 function is_mpath_device #disk
 {
@@ -149,6 +189,25 @@ function is_mpath_device #disk
 		else
 			return $?
 		fi
+	elif is_freebsd; then
+		is_disk_device $DEV_MPATHDIR/$disk
+	else
+		false
+	fi
+}
+
+#
+# Check if the given path is the appropriate sort of device special node.
+#
+function is_disk_device #path
+{
+	typeset path=$1
+
+	if is_freebsd; then
+		# FreeBSD doesn't have block devices, only character devices.
+		test -c $path
+	else
+		test -b $path
 	fi
 }
 
@@ -218,11 +277,11 @@ function get_device_dir #device
 {
 	typeset device=$1
 
-	if ! $(is_physical_device $device) ; then
+	if ! is_freebsd && ! is_physical_device $device; then
 		if [[ $device != "/" ]]; then
 			device=${device%/*}
 		fi
-		if [[ -b "$DEV_DSKDIR/$device" ]]; then
+		if is_disk_device "$DEV_DSKDIR/$device"; then
 			device="$DEV_DSKDIR"
 		fi
 		echo $device
@@ -279,25 +338,25 @@ function on_off_disk # disk state{online,offline} host
 		if [[ $state == "offline" ]] && ( is_mpath_device $disk ); then
 			dm_name="$(readlink $DEV_DSKDIR/$disk \
 			    | nawk -F / '{print $2}')"
-			slave="$(ls /sys/block/${dm_name}/slaves \
+			dep="$(ls /sys/block/${dm_name}/slaves \
 			    | nawk '{print $1}')"
-			while [[ -n $slave ]]; do
+			while [[ -n $dep ]]; do
 				#check if disk is online
-				lsscsi | egrep $slave > /dev/null
+				lsscsi | egrep $dep > /dev/null
 				if (($? == 0)); then
-					slave_dir="/sys/block/${dm_name}"
-					slave_dir+="/slaves/${slave}/device"
-					ss="${slave_dir}/state"
-					sd="${slave_dir}/delete"
+					dep_dir="/sys/block/${dm_name}"
+					dep_dir+="/slaves/${dep}/device"
+					ss="${dep_dir}/state"
+					sd="${dep_dir}/delete"
 					log_must eval "echo 'offline' > ${ss}"
 					log_must eval "echo '1' > ${sd}"
-					lsscsi | egrep $slave > /dev/null
+					lsscsi | egrep $dep > /dev/null
 						if (($? == 0)); then
 							log_fail "Offlining" \
 							    "$disk failed"
 						fi
 				fi
-				slave="$(ls /sys/block/$dm_name/slaves \
+				dep="$(ls /sys/block/$dm_name/slaves \
 				    2>/dev/null | nawk '{print $1}')"
 			done
 		elif [[ $state == "offline" ]] && ( is_real_device $disk ); then
@@ -323,9 +382,9 @@ function on_off_disk # disk state{online,offline} host
 			if is_mpath_device $disk; then
 				dm_name="$(readlink $DEV_DSKDIR/$disk \
 				    | nawk -F / '{print $2}')"
-				slave="$(ls /sys/block/$dm_name/slaves \
+				dep="$(ls /sys/block/$dm_name/slaves \
 				    | nawk '{print $1}')"
-				lsscsi | egrep $slave > /dev/null
+				lsscsi | egrep $dep > /dev/null
 				if (($? != 0)); then
 					log_fail "Onlining $disk failed"
 				fi
@@ -459,7 +518,7 @@ function get_pool_devices #testpool #devdir
 	typeset devdir=$2
 	typeset out=""
 
-	if is_linux; then
+	if is_linux || is_freebsd; then
 		out=$(zpool status -P $testpool |grep ${devdir} | awk '{print $1}')
 		out=$(echo $out | sed -e "s|${devdir}/||g" | tr '\n' ' ')
 	fi
@@ -485,7 +544,7 @@ function list_file_blocks # input_file
 
 	typeset ds="$(zfs list -H -o name $input_file)"
 	typeset pool="${ds%%/*}"
-	typeset inum="$(stat -c '%i' $input_file)"
+	typeset objnum="$(get_objnum $input_file)"
 
 	#
 	# Establish a mapping between vdev ids as shown in a DVA and the
@@ -516,7 +575,7 @@ function list_file_blocks # input_file
 	#
 	log_must zpool sync -f
 	typeset level path offset length
-	zdb -ddddd $ds $inum | awk -F: '
+	zdb -ddddd $ds $objnum | awk -F: '
 		BEGIN { looking = 0 }
 		/^Indirect blocks:/ { looking = 1}
 		/^\t\tsegment / { looking = 0}
@@ -539,14 +598,23 @@ function corrupt_blocks_at_level # input_file corrupt_level
 
 	[[ -f $input_file ]] || log_fail "Couldn't find $input_file"
 
+	if is_freebsd; then
+		# Temporarily allow corrupting an inuse device.
+		debugflags=$(sysctl -n kern.geom.debugflags)
+		sysctl kern.geom.debugflags=16
+	fi
 
-	log_must list_file_blocks $input_file | \
-	    while read level path offset length; do
+	list_file_blocks $input_file | \
+	while read level path offset length; do
 		if [[ $level = $corrupt_level ]]; then
 			log_must dd if=/dev/urandom of=$path bs=512 \
 			    count=$length seek=$offset conv=notrunc
 		fi
-	    done
+	done
+
+	if is_freebsd; then
+		sysctl kern.geom.debugflags=$debugflags
+	fi
 
 	# This is necessary for pools made of loop devices.
 	sync

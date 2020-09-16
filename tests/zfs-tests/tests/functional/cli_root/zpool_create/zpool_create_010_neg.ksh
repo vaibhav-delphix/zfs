@@ -48,10 +48,11 @@ verify_runnable "global"
 
 function cleanup
 {
-        poolexists $TOOSMALL && destroy_pool $TOOSMALL
-        poolexists $TESTPOOL1 && destroy_pool $TESTPOOL1
+	typeset pool
 
-        poolexists $TESTPOOL && destroy_pool $TESTPOOL
+	for pool in $TOOSMALL $TESTPOOL1 $TESTPOOL; do
+		poolexists $pool && destroy_pool $pool
+	done
 
 	rm -rf $TESTDIR
 }

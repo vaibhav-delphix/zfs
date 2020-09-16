@@ -27,7 +27,6 @@
 #include <sys/sysmacros.h>
 #include <sys/systeminfo.h>
 #include <sys/vmsystm.h>
-#include <sys/kobj.h>
 #include <sys/kmem.h>
 #include <sys/kmem_cache.h>
 #include <sys/vmem.h>
@@ -40,12 +39,16 @@
 #include <sys/proc.h>
 #include <sys/kstat.h>
 #include <sys/file.h>
+#include <sys/sunddi.h>
 #include <linux/ctype.h>
 #include <sys/disp.h>
 #include <sys/random.h>
 #include <sys/strings.h>
 #include <linux/kmod.h>
 #include "zfs_gitrev.h"
+#include <linux/mod_compat.h>
+#include <sys/cred.h>
+#include <sys/vnode.h>
 
 char spl_gitrev[64] = ZFS_META_GITREV;
 
@@ -90,7 +93,7 @@ EXPORT_SYMBOL(p0);
  * and use them when in_interrupt() from linux/preempt_mask.h evaluates to
  * true.
  */
-static DEFINE_PER_CPU(uint64_t[2], spl_pseudo_entropy);
+void __percpu *spl_pseudo_entropy;
 
 /*
  * spl_rand_next()/spl_rand_jump() are copied from the following CC-0 licensed
@@ -139,7 +142,7 @@ random_get_pseudo_bytes(uint8_t *ptr, size_t len)
 
 	ASSERT(ptr);
 
-	xp = get_cpu_var(spl_pseudo_entropy);
+	xp = get_cpu_ptr(spl_pseudo_entropy);
 
 	s[0] = xp[0];
 	s[1] = xp[1];
@@ -161,7 +164,7 @@ random_get_pseudo_bytes(uint8_t *ptr, size_t len)
 	xp[0] = s[0];
 	xp[1] = s[1];
 
-	put_cpu_var(spl_pseudo_entropy);
+	put_cpu_ptr(spl_pseudo_entropy);
 
 	return (0);
 }
@@ -170,6 +173,7 @@ random_get_pseudo_bytes(uint8_t *ptr, size_t len)
 EXPORT_SYMBOL(random_get_pseudo_bytes);
 
 #if BITS_PER_LONG == 32
+
 /*
  * Support 64/64 => 64 division on a 32-bit platform.  While the kernel
  * provides a div64_u64() function for this we do not use it because the
@@ -215,6 +219,14 @@ __div_u64(uint64_t u, uint32_t v)
 	(void) do_div(u, v);
 	return (u);
 }
+
+/*
+ * Turn off missing prototypes warning for these functions. They are
+ * replacements for libgcc-provided functions and will never be called
+ * directly.
+ */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-prototypes"
 
 /*
  * Implementation of 64-bit unsigned division for 32-bit machines.
@@ -273,7 +285,9 @@ int64_t
 __divdi3(int64_t u, int64_t v)
 {
 	int64_t q, t;
+	// cppcheck-suppress shiftTooManyBitsSigned
 	q = __udivdi3(abs64(u), abs64(v));
+	// cppcheck-suppress shiftTooManyBitsSigned
 	t = (u ^ v) >> 63;	// If u, v have different
 	return ((q ^ t) - t);	// signs, negate q.
 }
@@ -288,6 +302,26 @@ __umoddi3(uint64_t dividend, uint64_t divisor)
 	return (dividend - (divisor * __udivdi3(dividend, divisor)));
 }
 EXPORT_SYMBOL(__umoddi3);
+
+/* 64-bit signed modulo for 32-bit machines. */
+int64_t
+__moddi3(int64_t n, int64_t d)
+{
+	int64_t q;
+	boolean_t nn = B_FALSE;
+
+	if (n < 0) {
+		nn = B_TRUE;
+		n = -n;
+	}
+	if (d < 0)
+		d = -d;
+
+	q = __umoddi3(n, d);
+
+	return (nn ? -q : q);
+}
+EXPORT_SYMBOL(__moddi3);
 
 /*
  * Implementation of 64-bit unsigned division/modulo for 32-bit machines.
@@ -392,6 +426,9 @@ __aeabi_ldivmod(int64_t u, int64_t v)
 }
 EXPORT_SYMBOL(__aeabi_ldivmod);
 #endif /* __arm || __arm__ */
+
+#pragma GCC diagnostic pop
+
 #endif /* BITS_PER_LONG */
 
 /*
@@ -519,6 +556,48 @@ ddi_copyout(const void *from, void *to, size_t len, int flags)
 }
 EXPORT_SYMBOL(ddi_copyout);
 
+static ssize_t
+spl_kernel_read(struct file *file, void *buf, size_t count, loff_t *pos)
+{
+#if defined(HAVE_KERNEL_READ_PPOS)
+	return (kernel_read(file, buf, count, pos));
+#else
+	mm_segment_t saved_fs;
+	ssize_t ret;
+
+	saved_fs = get_fs();
+	set_fs(KERNEL_DS);
+
+	ret = vfs_read(file, (void __user *)buf, count, pos);
+
+	set_fs(saved_fs);
+
+	return (ret);
+#endif
+}
+
+static int
+spl_getattr(struct file *filp, struct kstat *stat)
+{
+	int rc;
+
+	ASSERT(filp);
+	ASSERT(stat);
+
+#if defined(HAVE_4ARGS_VFS_GETATTR)
+	rc = vfs_getattr(&filp->f_path, stat, STATX_BASIC_STATS,
+	    AT_STATX_SYNC_AS_STAT);
+#elif defined(HAVE_2ARGS_VFS_GETATTR)
+	rc = vfs_getattr(&filp->f_path, stat);
+#else
+	rc = vfs_getattr(filp->f_path.mnt, filp->f_dentry, stat);
+#endif
+	if (rc)
+		return (-rc);
+
+	return (0);
+}
+
 /*
  * Read the unique system identifier from the /etc/hostid file.
  *
@@ -562,38 +641,42 @@ static int
 hostid_read(uint32_t *hostid)
 {
 	uint64_t size;
-	struct _buf *file;
 	uint32_t value = 0;
 	int error;
+	loff_t off;
+	struct file *filp;
+	struct kstat stat;
 
-	file = kobj_open_file(spl_hostid_path);
-	if (file == (struct _buf *)-1)
+	filp = filp_open(spl_hostid_path, 0, 0);
+
+	if (IS_ERR(filp))
 		return (ENOENT);
 
-	error = kobj_get_filesize(file, &size);
+	error = spl_getattr(filp, &stat);
 	if (error) {
-		kobj_close_file(file);
+		filp_close(filp, 0);
 		return (error);
 	}
-
+	size = stat.size;
 	if (size < sizeof (HW_HOSTID_MASK)) {
-		kobj_close_file(file);
+		filp_close(filp, 0);
 		return (EINVAL);
 	}
 
+	off = 0;
 	/*
 	 * Read directly into the variable like eglibc does.
 	 * Short reads are okay; native behavior is preserved.
 	 */
-	error = kobj_read_file(file, (char *)&value, sizeof (value), 0);
+	error = spl_kernel_read(filp, &value, sizeof (value), &off);
 	if (error < 0) {
-		kobj_close_file(file);
+		filp_close(filp, 0);
 		return (EIO);
 	}
 
 	/* Mask down to 32 bits like coreutils does. */
 	*hostid = (value & HW_HOSTID_MASK);
-	kobj_close_file(file);
+	filp_close(filp, 0);
 
 	return (0);
 }
@@ -649,7 +732,10 @@ static void __init
 spl_random_init(void)
 {
 	uint64_t s[2];
-	int i;
+	int i = 0;
+
+	spl_pseudo_entropy = __alloc_percpu(2 * sizeof (uint64_t),
+	    sizeof (uint64_t));
 
 	get_random_bytes(s, sizeof (s));
 
@@ -667,13 +753,19 @@ spl_random_init(void)
 	}
 
 	for_each_possible_cpu(i) {
-		uint64_t *wordp = per_cpu(spl_pseudo_entropy, i);
+		uint64_t *wordp = per_cpu_ptr(spl_pseudo_entropy, i);
 
 		spl_rand_jump(s);
 
 		wordp[0] = s[0];
 		wordp[1] = s[1];
 	}
+}
+
+static void
+spl_random_fini(void)
+{
+	free_percpu(spl_pseudo_entropy);
 }
 
 static void
@@ -703,26 +795,21 @@ spl_init(void)
 	if ((rc = spl_kmem_cache_init()))
 		goto out4;
 
-	if ((rc = spl_vn_init()))
+	if ((rc = spl_proc_init()))
 		goto out5;
 
-	if ((rc = spl_proc_init()))
+	if ((rc = spl_kstat_init()))
 		goto out6;
 
-	if ((rc = spl_kstat_init()))
-		goto out7;
-
 	if ((rc = spl_zlib_init()))
-		goto out8;
+		goto out7;
 
 	return (rc);
 
-out8:
-	spl_kstat_fini();
 out7:
-	spl_proc_fini();
+	spl_kstat_fini();
 out6:
-	spl_vn_fini();
+	spl_proc_fini();
 out5:
 	spl_kmem_cache_fini();
 out4:
@@ -741,17 +828,17 @@ spl_fini(void)
 	spl_zlib_fini();
 	spl_kstat_fini();
 	spl_proc_fini();
-	spl_vn_fini();
 	spl_kmem_cache_fini();
 	spl_taskq_fini();
 	spl_tsd_fini();
 	spl_kvmem_fini();
+	spl_random_fini();
 }
 
 module_init(spl_init);
 module_exit(spl_fini);
 
-MODULE_DESCRIPTION("Solaris Porting Layer");
-MODULE_AUTHOR(ZFS_META_AUTHOR);
-MODULE_LICENSE("GPL");
-MODULE_VERSION(ZFS_META_VERSION "-" ZFS_META_RELEASE);
+ZFS_MODULE_DESCRIPTION("Solaris Porting Layer");
+ZFS_MODULE_AUTHOR(ZFS_META_AUTHOR);
+ZFS_MODULE_LICENSE("GPL");
+ZFS_MODULE_VERSION(ZFS_META_VERSION "-" ZFS_META_RELEASE);

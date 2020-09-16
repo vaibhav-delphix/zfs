@@ -37,6 +37,7 @@
  *
  *	zfs_is_mounted()
  *	zfs_mount()
+ *	zfs_mount_at()
  *	zfs_unmount()
  *	zfs_unmountall()
  *
@@ -94,7 +95,6 @@
 static int mount_tp_nthr = 512;	/* tpool threads for multi-threaded mounting */
 
 static void zfs_mount_task(void *);
-static int zfs_share_proto(zfs_handle_t *, zfs_share_proto_t *);
 zfs_share_type_t zfs_is_shared_proto(zfs_handle_t *, char **,
     zfs_share_proto_t);
 
@@ -102,13 +102,6 @@ zfs_share_type_t zfs_is_shared_proto(zfs_handle_t *, char **,
  * The share protocols table must be in the same order as the zfs_share_proto_t
  * enum in libzfs_impl.h
  */
-typedef struct {
-	zfs_prop_t p_prop;
-	char *p_name;
-	int p_share_err;
-	int p_unshare_err;
-} proto_table_t;
-
 proto_table_t proto_table[PROTO_END] = {
 	{ZFS_PROP_SHARENFS, "nfs", EZFS_SHARENFSFAILED, EZFS_UNSHARENFSFAILED},
 	{ZFS_PROP_SHARESMB, "smb", EZFS_SHARESMBFAILED, EZFS_UNSHARESMBFAILED},
@@ -128,6 +121,8 @@ zfs_share_proto_t share_all_proto[] = {
 	PROTO_SMB,
 	PROTO_END
 };
+
+
 
 static boolean_t
 dir_is_empty_stat(const char *dirname)
@@ -246,10 +241,27 @@ zfs_is_mounted(zfs_handle_t *zhp, char **where)
 }
 
 /*
+ * Checks any higher order concerns about whether the given dataset is
+ * mountable, false otherwise.  zfs_is_mountable_internal specifically assumes
+ * that the caller has verified the sanity of mounting the dataset at
+ * mountpoint to the extent the caller wants.
+ */
+static boolean_t
+zfs_is_mountable_internal(zfs_handle_t *zhp, const char *mountpoint)
+{
+
+	if (zfs_prop_get_int(zhp, ZFS_PROP_ZONED) &&
+	    getzoneid() == GLOBAL_ZONEID)
+		return (B_FALSE);
+
+	return (B_TRUE);
+}
+
+/*
  * Returns true if the given dataset is mountable, false otherwise.  Returns the
  * mountpoint in 'buf'.
  */
-static boolean_t
+boolean_t
 zfs_is_mountable(zfs_handle_t *zhp, char *buf, size_t buflen,
     zprop_source_t *source, int flags)
 {
@@ -270,12 +282,7 @@ zfs_is_mountable(zfs_handle_t *zhp, char *buf, size_t buflen,
 	if (zfs_prop_get_int(zhp, ZFS_PROP_CANMOUNT) == ZFS_CANMOUNT_OFF)
 		return (B_FALSE);
 
-	if (zfs_prop_get_int(zhp, ZFS_PROP_ZONED) &&
-	    getzoneid() == GLOBAL_ZONEID)
-		return (B_FALSE);
-
-	if (zfs_prop_get_int(zhp, ZFS_PROP_ZONED) &&
-	    getzoneid() == GLOBAL_ZONEID)
+	if (!zfs_is_mountable_internal(zhp, buf))
 		return (B_FALSE);
 
 	if (zfs_prop_get_int(zhp, ZFS_PROP_REDACTED) && !(flags & MS_FORCE))
@@ -303,68 +310,6 @@ zfs_is_mountable(zfs_handle_t *zhp, char *buf, size_t buflen,
  *
  * http://www.kernel.org/pub/linux/utils/util-linux/libmount-docs/index.html
  */
-
-static int
-do_mount(const char *src, const char *mntpt, char *opts)
-{
-	char *argv[9] = {
-	    "/bin/mount",
-	    "--no-canonicalize",
-	    "-t", MNTTYPE_ZFS,
-	    "-o", opts,
-	    (char *)src,
-	    (char *)mntpt,
-	    (char *)NULL };
-	int rc;
-
-	/* Return only the most critical mount error */
-	rc = libzfs_run_process(argv[0], argv, STDOUT_VERBOSE|STDERR_VERBOSE);
-	if (rc) {
-		if (rc & MOUNT_FILEIO)
-			return (EIO);
-		if (rc & MOUNT_USER)
-			return (EINTR);
-		if (rc & MOUNT_SOFTWARE)
-			return (EPIPE);
-		if (rc & MOUNT_BUSY)
-			return (EBUSY);
-		if (rc & MOUNT_SYSERR)
-			return (EAGAIN);
-		if (rc & MOUNT_USAGE)
-			return (EINVAL);
-
-		return (ENXIO); /* Generic error */
-	}
-
-	return (0);
-}
-
-static int
-do_unmount(const char *mntpt, int flags)
-{
-	char force_opt[] = "-f";
-	char lazy_opt[] = "-l";
-	char *argv[7] = {
-	    "/bin/umount",
-	    "-t", MNTTYPE_ZFS,
-	    NULL, NULL, NULL, NULL };
-	int rc, count = 3;
-
-	if (flags & MS_FORCE) {
-		argv[count] = force_opt;
-		count++;
-	}
-
-	if (flags & MS_DETACH) {
-		argv[count] = lazy_opt;
-		count++;
-	}
-
-	argv[count] = (char *)mntpt;
-	rc = libzfs_run_process(argv[0], argv, STDOUT_VERBOSE|STDERR_VERBOSE);
-
-	return (rc ? EINVAL : 0);
-}
 
 static int
 zfs_add_option(zfs_handle_t *zhp, char *options, int len,
@@ -418,14 +363,26 @@ zfs_add_options(zfs_handle_t *zhp, char *options, int len)
 	return (error);
 }
 
+int
+zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
+{
+	char mountpoint[ZFS_MAXPROPLEN];
+
+	if (!zfs_is_mountable(zhp, mountpoint, sizeof (mountpoint), NULL,
+	    flags))
+		return (0);
+
+	return (zfs_mount_at(zhp, options, flags, mountpoint));
+}
+
 /*
  * Mount the given filesystem.
  */
 int
-zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
+zfs_mount_at(zfs_handle_t *zhp, const char *options, int flags,
+    const char *mountpoint)
 {
 	struct stat buf;
-	char mountpoint[ZFS_MAXPROPLEN];
 	char mntopts[MNT_LINE_MAX];
 	char overlay[ZFS_MAXPROPLEN];
 	libzfs_handle_t *hdl = zhp->zfs_hdl;
@@ -441,16 +398,15 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 	if (strstr(mntopts, MNTOPT_REMOUNT) != NULL)
 		remount = 1;
 
+	/* Potentially duplicates some checks if invoked by zfs_mount(). */
+	if (!zfs_is_mountable_internal(zhp, mountpoint))
+		return (0);
+
 	/*
 	 * If the pool is imported read-only then all mounts must be read-only
 	 */
 	if (zpool_get_prop_int(zhp->zpool_hdl, ZPOOL_PROP_READONLY, NULL))
 		(void) strlcat(mntopts, "," MNTOPT_RO, sizeof (mntopts));
-
-	if (!zfs_is_mountable(zhp, mountpoint, sizeof (mountpoint), NULL,
-	    flags)) {
-		return (0);
-	}
 
 	/*
 	 * Append default mount options which apply to the mount point.
@@ -510,7 +466,8 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 	if (lstat(mountpoint, &buf) != 0) {
 		if (mkdirp(mountpoint, 0755) != 0) {
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-			    "failed to create mountpoint"));
+			    "failed to create mountpoint: %s"),
+			    strerror(errno));
 			return (zfs_error_fmt(hdl, EZFS_MOUNTFAILED,
 			    dgettext(TEXT_DOMAIN, "cannot mount '%s'"),
 			    mountpoint));
@@ -518,8 +475,8 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 	}
 
 	/*
-	 * Overlay mounts are disabled by default but may be enabled
-	 * via the 'overlay' property or the 'zfs mount -O' option.
+	 * Overlay mounts are enabled by default but may be disabled
+	 * via the 'overlay' property. The -O flag remains for compatibility.
 	 */
 	if (!(flags & MS_OVERLAY)) {
 		if (zfs_prop_get(zhp, ZFS_PROP_OVERLAY, overlay,
@@ -533,7 +490,7 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 	/*
 	 * Determine if the mountpoint is empty.  If so, refuse to perform the
 	 * mount.  We don't perform this check if 'remount' is
-	 * specified or if overlay option(-O) is given
+	 * specified or if overlay option (-O) is given
 	 */
 	if ((flags & MS_OVERLAY) == 0 && !remount &&
 	    !dir_is_empty(mountpoint)) {
@@ -544,7 +501,7 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 	}
 
 	/* perform the mount */
-	rc = do_mount(zfs_get_name(zhp), mountpoint, mntopts);
+	rc = do_mount(zhp, mountpoint, mntopts, flags);
 	if (rc) {
 		/*
 		 * Generic errors are nasty, but there are just way too many
@@ -948,12 +905,13 @@ zfs_unshare_proto(zfs_handle_t *zhp, const char *mountpoint,
 		for (curr_proto = proto; *curr_proto != PROTO_END;
 		    curr_proto++) {
 
-			if (is_shared(mntpt, *curr_proto) &&
-			    unshare_one(hdl, zhp->zfs_name,
-			    mntpt, *curr_proto) != 0) {
-				if (mntpt != NULL)
-					free(mntpt);
-				return (-1);
+			if (is_shared(mntpt, *curr_proto)) {
+				if (unshare_one(hdl, zhp->zfs_name,
+				    mntpt, *curr_proto) != 0) {
+					if (mntpt != NULL)
+						free(mntpt);
+					return (-1);
+				}
 			}
 		}
 	}
@@ -978,7 +936,7 @@ zfs_unshare_smb(zfs_handle_t *zhp, const char *mountpoint)
 /*
  * Same as zfs_unmountall(), but for NFS and SMB unshares.
  */
-int
+static int
 zfs_unshareall_proto(zfs_handle_t *zhp, zfs_share_proto_t *proto)
 {
 	prop_changelist_t *clp;
@@ -1049,7 +1007,8 @@ remove_mountpoint(zfs_handle_t *zhp)
 	char mountpoint[ZFS_MAXPROPLEN];
 	zprop_source_t source;
 
-	if (!zfs_is_mountable(zhp, mountpoint, sizeof (mountpoint), &source, 0))
+	if (!zfs_is_mountable(zhp, mountpoint, sizeof (mountpoint),
+	    &source, 0))
 		return;
 
 	if (source == ZPROP_SRC_DEFAULT ||

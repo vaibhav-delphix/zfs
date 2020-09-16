@@ -116,12 +116,11 @@
 #include <sys/dsl_destroy.h>
 #include <sys/dsl_scan.h>
 #include <sys/zio_checksum.h>
-#include <sys/refcount.h>
+#include <sys/zfs_refcount.h>
 #include <sys/zfeature.h>
 #include <sys/dsl_userhold.h>
 #include <sys/abd.h>
 #include <stdio.h>
-#include <stdio_ext.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
@@ -649,7 +648,12 @@ nicenumtoull(const char *buf)
 	} else if (end[0] == '.') {
 		double fval = strtod(buf, &end);
 		fval *= pow(2, str2shift(end));
-		if (fval > UINT64_MAX) {
+		/*
+		 * UINT64_MAX is not exactly representable as a double.
+		 * The closest representation is UINT64_MAX + 1, so we
+		 * use a >= comparison instead of > for the bounds check.
+		 */
+		if (fval >= (double)UINT64_MAX) {
 			(void) fprintf(stderr, "ztest: value too large: %s\n",
 			    buf);
 			usage(B_FALSE);
@@ -1580,7 +1584,7 @@ ztest_bt_bonus(dmu_buf_t *db)
  * helps ensure that all dnode traversal code properly skips the
  * interior regions of large dnodes.
  */
-void
+static void
 ztest_fill_unused_bonus(dmu_buf_t *db, void *end, uint64_t obj,
     objset_t *os, uint64_t gen)
 {
@@ -1599,7 +1603,7 @@ ztest_fill_unused_bonus(dmu_buf_t *db, void *end, uint64_t obj,
  * Verify that the unused area of a bonus buffer is filled with the
  * expected tokens.
  */
-void
+static void
 ztest_verify_unused_bonus(dmu_buf_t *db, void *end, uint64_t obj,
     objset_t *os, uint64_t gen)
 {
@@ -2198,7 +2202,7 @@ ztest_get_data(void *arg, lr_write_t *lr, char *buf, struct lwb *lwb,
 	zgd->zgd_private = zd;
 
 	if (buf != NULL) {	/* immediate write */
-		zgd->zgd_lr = (struct locked_range *)ztest_range_lock(zd,
+		zgd->zgd_lr = (struct zfs_locked_range *)ztest_range_lock(zd,
 		    object, offset, size, RL_READER);
 
 		error = dmu_read(os, object, offset, size, buf,
@@ -2213,7 +2217,7 @@ ztest_get_data(void *arg, lr_write_t *lr, char *buf, struct lwb *lwb,
 			offset = 0;
 		}
 
-		zgd->zgd_lr = (struct locked_range *)ztest_range_lock(zd,
+		zgd->zgd_lr = (struct zfs_locked_range *)ztest_range_lock(zd,
 		    object, offset, size, RL_READER);
 
 		error = dmu_buf_hold(os, object, offset, zgd, &db,
@@ -2255,7 +2259,7 @@ ztest_lr_alloc(size_t lrsize, char *name)
 	return (lr);
 }
 
-void
+static void
 ztest_lr_free(void *lr, size_t lrsize, char *name)
 {
 	size_t namesize = name ? strlen(name) + 1 : 0;
@@ -2863,7 +2867,7 @@ ztest_spa_upgrade(ztest_ds_t *zd, uint64_t id)
 	    zpool_prop_to_name(ZPOOL_PROP_VERSION)));
 	spa_close(spa, FTAG);
 
-	strfree(name);
+	kmem_strfree(name);
 	mutex_exit(&ztest_vdev_lock);
 }
 
@@ -3529,7 +3533,16 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 	root = make_vdev_root(newpath, NULL, NULL, newvd == NULL ? newsize : 0,
 	    ashift, NULL, 0, 0, 1);
 
-	error = spa_vdev_attach(spa, oldguid, root, replacing);
+	/*
+	 * When supported select either a healing or sequential resilver.
+	 */
+	boolean_t rebuilding = B_FALSE;
+	if (pvd->vdev_ops == &vdev_mirror_ops ||
+	    pvd->vdev_ops ==  &vdev_root_ops) {
+		rebuilding = !!ztest_random(2);
+	}
+
+	error = spa_vdev_attach(spa, oldguid, root, replacing, rebuilding);
 
 	nvlist_free(root);
 
@@ -3549,10 +3562,11 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 		expected_error = error;
 
 	if (error == ZFS_ERR_CHECKPOINT_EXISTS ||
-	    error == ZFS_ERR_DISCARDING_CHECKPOINT)
+	    error == ZFS_ERR_DISCARDING_CHECKPOINT ||
+	    error == ZFS_ERR_RESILVER_IN_PROGRESS ||
+	    error == ZFS_ERR_REBUILD_IN_PROGRESS)
 		expected_error = error;
 
-	/* XXX workaround 6690467 */
 	if (error != expected_error && expected_error != EBUSY) {
 		fatal(0, "attach (%s %llu, %s %llu, %d) "
 		    "returned %d, expected %d",
@@ -3631,10 +3645,10 @@ ztest_device_removal(ztest_ds_t *zd, uint64_t id)
 /*
  * Callback function which expands the physical size of the vdev.
  */
-vdev_t *
+static vdev_t *
 grow_vdev(vdev_t *vd, void *arg)
 {
-	ASSERTV(spa_t *spa = vd->vdev_spa);
+	spa_t *spa __maybe_unused = vd->vdev_spa;
 	size_t *newsize = arg;
 	size_t fsize;
 	int fd;
@@ -3660,7 +3674,7 @@ grow_vdev(vdev_t *vd, void *arg)
  * Callback function which expands a given vdev by calling vdev_online().
  */
 /* ARGSUSED */
-vdev_t *
+static vdev_t *
 online_vdev(vdev_t *vd, void *arg)
 {
 	spa_t *spa = vd->vdev_spa;
@@ -3720,7 +3734,7 @@ online_vdev(vdev_t *vd, void *arg)
  * If a NULL callback is passed, then we just return back the first
  * leaf vdev we encounter.
  */
-vdev_t *
+static vdev_t *
 vdev_walk_tree(vdev_t *vd, vdev_t *(*func)(vdev_t *, void *), void *arg)
 {
 	uint_t c;
@@ -4173,7 +4187,7 @@ ztest_dmu_snapshot_create_destroy(ztest_ds_t *zd, uint64_t id)
 /*
  * Cleanup non-standard snapshots and clones.
  */
-void
+static void
 ztest_dsl_dataset_cleanup(char *osname, uint64_t id)
 {
 	char *snap1name;
@@ -4627,7 +4641,7 @@ ztest_dmu_read_write(ztest_ds_t *zd, uint64_t id)
 	umem_free(od, size);
 }
 
-void
+static void
 compare_and_update_pbbufs(uint64_t s, bufwad_t *packbuf, bufwad_t *bigbuf,
     uint64_t bigsize, uint64_t n, uint64_t chunksize, uint64_t txg)
 {
@@ -5853,8 +5867,8 @@ ztest_fault_inject(ztest_ds_t *zd, uint64_t id)
 			    (long long)vd0->vdev_id, (int)maxfaults);
 
 			if (vf != NULL && ztest_random(3) == 0) {
-				(void) close(vf->vf_vnode->v_fd);
-				vf->vf_vnode->v_fd = -1;
+				(void) close(vf->vf_file->f_fd);
+				vf->vf_file->f_fd = -1;
 			} else if (ztest_random(2) == 0) {
 				vd0->vdev_cant_read = B_TRUE;
 			} else {
@@ -5946,24 +5960,26 @@ ztest_fault_inject(ztest_ds_t *zd, uint64_t id)
 		 * on two different leaf devices, because ZFS can not
 		 * tolerate that (if maxfaults==1).
 		 *
-		 * We divide each leaf into chunks of size
-		 * (# leaves * SPA_MAXBLOCKSIZE * 4).  Within each chunk
-		 * there is a series of ranges to which we can inject errors.
-		 * Each range can accept errors on only a single leaf vdev.
-		 * The error injection ranges are separated by ranges
-		 * which we will not inject errors on any device (DMZs).
-		 * Each DMZ must be large enough such that a single block
-		 * can not straddle it, so that a single block can not be
-		 * a target in two different injection ranges (on different
-		 * leaf vdevs).
+		 * To achieve this we divide each leaf device into
+		 * chunks of size (# leaves * SPA_MAXBLOCKSIZE * 4).
+		 * Each chunk is further divided into error-injection
+		 * ranges (can accept errors) and clear ranges (we do
+		 * not inject errors in those). Each error-injection
+		 * range can accept errors only for a single leaf vdev.
+		 * Error-injection ranges are separated by clear ranges.
 		 *
 		 * For example, with 3 leaves, each chunk looks like:
 		 *    0 to  32M: injection range for leaf 0
-		 *  32M to  64M: DMZ - no injection allowed
+		 *  32M to  64M: clear range - no injection allowed
 		 *  64M to  96M: injection range for leaf 1
-		 *  96M to 128M: DMZ - no injection allowed
+		 *  96M to 128M: clear range - no injection allowed
 		 * 128M to 160M: injection range for leaf 2
-		 * 160M to 192M: DMZ - no injection allowed
+		 * 160M to 192M: clear range - no injection allowed
+		 *
+		 * Each clear range must be large enough such that a
+		 * single block cannot straddle it. This way a block
+		 * can't be a target in two different injection ranges
+		 * (on different leaf vdevs).
 		 */
 		offset = ztest_random(fsize / (leaves << bshift)) *
 		    (leaves << bshift) + (leaf << bshift) +
@@ -6479,11 +6495,11 @@ ztest_run_zdb(char *pool)
 	ztest_get_zdb_bin(bin, len);
 
 	(void) sprintf(zdb,
-	    "%s -bcc%s%s -G -d -Y -U %s %s",
+	    "%s -bcc%s%s -G -d -Y -e -y -p %s %s",
 	    bin,
 	    ztest_opts.zo_verbose >= 3 ? "s" : "",
 	    ztest_opts.zo_verbose >= 4 ? "v" : "",
-	    spa_config_path,
+	    ztest_opts.zo_dir,
 	    pool);
 
 	if (ztest_opts.zo_verbose >= 5)
@@ -6919,6 +6935,149 @@ ztest_replay_zil_cb(const char *name, void *arg)
 	return (0);
 }
 
+static void
+ztest_freeze(void)
+{
+	ztest_ds_t *zd = &ztest_ds[0];
+	spa_t *spa;
+	int numloops = 0;
+
+	if (ztest_opts.zo_verbose >= 3)
+		(void) printf("testing spa_freeze()...\n");
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	VERIFY3U(0, ==, spa_open(ztest_opts.zo_pool, &spa, FTAG));
+	VERIFY3U(0, ==, ztest_dataset_open(0));
+	ztest_spa = spa;
+
+	/*
+	 * Force the first log block to be transactionally allocated.
+	 * We have to do this before we freeze the pool -- otherwise
+	 * the log chain won't be anchored.
+	 */
+	while (BP_IS_HOLE(&zd->zd_zilog->zl_header->zh_log)) {
+		ztest_dmu_object_alloc_free(zd, 0);
+		zil_commit(zd->zd_zilog, 0);
+	}
+
+	txg_wait_synced(spa_get_dsl(spa), 0);
+
+	/*
+	 * Freeze the pool.  This stops spa_sync() from doing anything,
+	 * so that the only way to record changes from now on is the ZIL.
+	 */
+	spa_freeze(spa);
+
+	/*
+	 * Because it is hard to predict how much space a write will actually
+	 * require beforehand, we leave ourselves some fudge space to write over
+	 * capacity.
+	 */
+	uint64_t capacity = metaslab_class_get_space(spa_normal_class(spa)) / 2;
+
+	/*
+	 * Run tests that generate log records but don't alter the pool config
+	 * or depend on DSL sync tasks (snapshots, objset create/destroy, etc).
+	 * We do a txg_wait_synced() after each iteration to force the txg
+	 * to increase well beyond the last synced value in the uberblock.
+	 * The ZIL should be OK with that.
+	 *
+	 * Run a random number of times less than zo_maxloops and ensure we do
+	 * not run out of space on the pool.
+	 */
+	while (ztest_random(10) != 0 &&
+	    numloops++ < ztest_opts.zo_maxloops &&
+	    metaslab_class_get_alloc(spa_normal_class(spa)) < capacity) {
+		ztest_od_t od;
+		ztest_od_init(&od, 0, FTAG, 0, DMU_OT_UINT64_OTHER, 0, 0, 0);
+		VERIFY0(ztest_object_init(zd, &od, sizeof (od), B_FALSE));
+		ztest_io(zd, od.od_object,
+		    ztest_random(ZTEST_RANGE_LOCKS) << SPA_MAXBLOCKSHIFT);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+
+	/*
+	 * Commit all of the changes we just generated.
+	 */
+	zil_commit(zd->zd_zilog, 0);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+
+	/*
+	 * Close our dataset and close the pool.
+	 */
+	ztest_dataset_close(0);
+	spa_close(spa, FTAG);
+	kernel_fini();
+
+	/*
+	 * Open and close the pool and dataset to induce log replay.
+	 */
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	VERIFY3U(0, ==, spa_open(ztest_opts.zo_pool, &spa, FTAG));
+	ASSERT(spa_freeze_txg(spa) == UINT64_MAX);
+	VERIFY3U(0, ==, ztest_dataset_open(0));
+	ztest_spa = spa;
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	ztest_dataset_close(0);
+	ztest_reguid(NULL, 0);
+
+	spa_close(spa, FTAG);
+	kernel_fini();
+}
+
+static void
+ztest_import_impl(ztest_shared_t *zs)
+{
+	importargs_t args = { 0 };
+	nvlist_t *cfg = NULL;
+	int nsearch = 1;
+	char *searchdirs[nsearch];
+	int flags = ZFS_IMPORT_MISSING_LOG;
+
+	searchdirs[0] = ztest_opts.zo_dir;
+	args.paths = nsearch;
+	args.path = searchdirs;
+	args.can_be_active = B_FALSE;
+
+	VERIFY0(zpool_find_config(NULL, ztest_opts.zo_pool, &cfg, &args,
+	    &libzpool_config_ops));
+	VERIFY0(spa_import(ztest_opts.zo_pool, cfg, NULL, flags));
+}
+
+/*
+ * Import a storage pool with the given name.
+ */
+static void
+ztest_import(ztest_shared_t *zs)
+{
+	spa_t *spa;
+
+	mutex_init(&ztest_vdev_lock, NULL, MUTEX_DEFAULT, NULL);
+	mutex_init(&ztest_checkpoint_lock, NULL, MUTEX_DEFAULT, NULL);
+	VERIFY0(pthread_rwlock_init(&ztest_name_lock, NULL));
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+
+	ztest_import_impl(zs);
+
+	VERIFY0(spa_open(ztest_opts.zo_pool, &spa, FTAG));
+	zs->zs_metaslab_sz =
+	    1ULL << spa->spa_root_vdev->vdev_child[0]->vdev_ms_shift;
+	spa_close(spa, FTAG);
+
+	kernel_fini();
+
+	if (!ztest_opts.zo_mmp_test) {
+		ztest_run_zdb(ztest_opts.zo_pool);
+		ztest_freeze();
+		ztest_run_zdb(ztest_opts.zo_pool);
+	}
+
+	(void) pthread_rwlock_destroy(&ztest_name_lock);
+	mutex_destroy(&ztest_vdev_lock);
+	mutex_destroy(&ztest_checkpoint_lock);
+}
+
 /*
  * Kick off threads to run tests on all datasets in parallel.
  */
@@ -6958,10 +7117,19 @@ ztest_run(ztest_shared_t *zs)
 	    offsetof(ztest_cb_data_t, zcd_node));
 
 	/*
-	 * Open our pool.
+	 * Open our pool.  It may need to be imported first depending on
+	 * what tests were running when the previous pass was terminated.
 	 */
-	kernel_init(FREAD | FWRITE);
-	VERIFY0(spa_open(ztest_opts.zo_pool, &spa, FTAG));
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	error = spa_open(ztest_opts.zo_pool, &spa, FTAG);
+	if (error) {
+		VERIFY3S(error, ==, ENOENT);
+		ztest_import_impl(zs);
+		VERIFY0(spa_open(ztest_opts.zo_pool, &spa, FTAG));
+		zs->zs_metaslab_sz =
+		    1ULL << spa->spa_root_vdev->vdev_child[0]->vdev_ms_shift;
+	}
+
 	metaslab_preload_limit = ztest_random(20) + 1;
 	ztest_spa = spa;
 
@@ -7140,96 +7308,6 @@ ztest_run(ztest_shared_t *zs)
 }
 
 static void
-ztest_freeze(void)
-{
-	ztest_ds_t *zd = &ztest_ds[0];
-	spa_t *spa;
-	int numloops = 0;
-
-	if (ztest_opts.zo_verbose >= 3)
-		(void) printf("testing spa_freeze()...\n");
-
-	kernel_init(FREAD | FWRITE);
-	VERIFY3U(0, ==, spa_open(ztest_opts.zo_pool, &spa, FTAG));
-	VERIFY3U(0, ==, ztest_dataset_open(0));
-	ztest_spa = spa;
-
-	/*
-	 * Force the first log block to be transactionally allocated.
-	 * We have to do this before we freeze the pool -- otherwise
-	 * the log chain won't be anchored.
-	 */
-	while (BP_IS_HOLE(&zd->zd_zilog->zl_header->zh_log)) {
-		ztest_dmu_object_alloc_free(zd, 0);
-		zil_commit(zd->zd_zilog, 0);
-	}
-
-	txg_wait_synced(spa_get_dsl(spa), 0);
-
-	/*
-	 * Freeze the pool.  This stops spa_sync() from doing anything,
-	 * so that the only way to record changes from now on is the ZIL.
-	 */
-	spa_freeze(spa);
-
-	/*
-	 * Because it is hard to predict how much space a write will actually
-	 * require beforehand, we leave ourselves some fudge space to write over
-	 * capacity.
-	 */
-	uint64_t capacity = metaslab_class_get_space(spa_normal_class(spa)) / 2;
-
-	/*
-	 * Run tests that generate log records but don't alter the pool config
-	 * or depend on DSL sync tasks (snapshots, objset create/destroy, etc).
-	 * We do a txg_wait_synced() after each iteration to force the txg
-	 * to increase well beyond the last synced value in the uberblock.
-	 * The ZIL should be OK with that.
-	 *
-	 * Run a random number of times less than zo_maxloops and ensure we do
-	 * not run out of space on the pool.
-	 */
-	while (ztest_random(10) != 0 &&
-	    numloops++ < ztest_opts.zo_maxloops &&
-	    metaslab_class_get_alloc(spa_normal_class(spa)) < capacity) {
-		ztest_od_t od;
-		ztest_od_init(&od, 0, FTAG, 0, DMU_OT_UINT64_OTHER, 0, 0, 0);
-		VERIFY0(ztest_object_init(zd, &od, sizeof (od), B_FALSE));
-		ztest_io(zd, od.od_object,
-		    ztest_random(ZTEST_RANGE_LOCKS) << SPA_MAXBLOCKSHIFT);
-		txg_wait_synced(spa_get_dsl(spa), 0);
-	}
-
-	/*
-	 * Commit all of the changes we just generated.
-	 */
-	zil_commit(zd->zd_zilog, 0);
-	txg_wait_synced(spa_get_dsl(spa), 0);
-
-	/*
-	 * Close our dataset and close the pool.
-	 */
-	ztest_dataset_close(0);
-	spa_close(spa, FTAG);
-	kernel_fini();
-
-	/*
-	 * Open and close the pool and dataset to induce log replay.
-	 */
-	kernel_init(FREAD | FWRITE);
-	VERIFY3U(0, ==, spa_open(ztest_opts.zo_pool, &spa, FTAG));
-	ASSERT(spa_freeze_txg(spa) == UINT64_MAX);
-	VERIFY3U(0, ==, ztest_dataset_open(0));
-	ztest_spa = spa;
-	txg_wait_synced(spa_get_dsl(spa), 0);
-	ztest_dataset_close(0);
-	ztest_reguid(NULL, 0);
-
-	spa_close(spa, FTAG);
-	kernel_fini();
-}
-
-void
 print_time(hrtime_t t, char *timebuf)
 {
 	hrtime_t s = t / NANOSEC;
@@ -7271,56 +7349,6 @@ make_random_props(void)
 }
 
 /*
- * Import a storage pool with the given name.
- */
-static void
-ztest_import(ztest_shared_t *zs)
-{
-	importargs_t args = { 0 };
-	spa_t *spa;
-	nvlist_t *cfg = NULL;
-	int nsearch = 1;
-	char *searchdirs[nsearch];
-	char *name = ztest_opts.zo_pool;
-	int flags = ZFS_IMPORT_MISSING_LOG;
-	int error;
-
-	mutex_init(&ztest_vdev_lock, NULL, MUTEX_DEFAULT, NULL);
-	mutex_init(&ztest_checkpoint_lock, NULL, MUTEX_DEFAULT, NULL);
-	VERIFY0(pthread_rwlock_init(&ztest_name_lock, NULL));
-
-	kernel_init(FREAD | FWRITE);
-
-	searchdirs[0] = ztest_opts.zo_dir;
-	args.paths = nsearch;
-	args.path = searchdirs;
-	args.can_be_active = B_FALSE;
-
-	error = zpool_find_config(NULL, name, &cfg, &args,
-	    &libzpool_config_ops);
-	if (error)
-		(void) fatal(0, "No pools found\n");
-
-	VERIFY0(spa_import(name, cfg, NULL, flags));
-	VERIFY0(spa_open(name, &spa, FTAG));
-	zs->zs_metaslab_sz =
-	    1ULL << spa->spa_root_vdev->vdev_child[0]->vdev_ms_shift;
-	spa_close(spa, FTAG);
-
-	kernel_fini();
-
-	if (!ztest_opts.zo_mmp_test) {
-		ztest_run_zdb(ztest_opts.zo_pool);
-		ztest_freeze();
-		ztest_run_zdb(ztest_opts.zo_pool);
-	}
-
-	(void) pthread_rwlock_destroy(&ztest_name_lock);
-	mutex_destroy(&ztest_vdev_lock);
-	mutex_destroy(&ztest_checkpoint_lock);
-}
-
-/*
  * Create a storage pool with the given name and initial vdev size.
  * Then test spa_freeze() functionality.
  */
@@ -7335,7 +7363,7 @@ ztest_init(ztest_shared_t *zs)
 	mutex_init(&ztest_checkpoint_lock, NULL, MUTEX_DEFAULT, NULL);
 	VERIFY0(pthread_rwlock_init(&ztest_name_lock, NULL));
 
-	kernel_init(FREAD | FWRITE);
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
 
 	/*
 	 * Create the storage pool.

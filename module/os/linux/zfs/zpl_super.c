@@ -23,9 +23,9 @@
  */
 
 
+#include <sys/zfs_znode.h>
 #include <sys/zfs_vfsops.h>
 #include <sys/zfs_vnops.h>
-#include <sys/zfs_znode.h>
 #include <sys/zfs_ctldir.h>
 #include <sys/zpl.h>
 
@@ -138,7 +138,7 @@ zpl_statfs(struct dentry *dentry, struct kstatfs *statp)
 	int error;
 
 	cookie = spl_fstrans_mark();
-	error = -zfs_statvfs(dentry, statp);
+	error = -zfs_statvfs(dentry->d_inode, statp);
 	spl_fstrans_unmark(cookie);
 	ASSERT3S(error, <=, 0);
 
@@ -180,6 +180,25 @@ zpl_remount_fs(struct super_block *sb, int *flags, char *data)
 	ASSERT3S(error, <=, 0);
 
 	return (error);
+}
+
+static int
+__zpl_show_devname(struct seq_file *seq, zfsvfs_t *zfsvfs)
+{
+	char *fsname;
+
+	fsname = kmem_alloc(ZFS_MAX_DATASET_NAME_LEN, KM_SLEEP);
+	dmu_objset_name(zfsvfs->z_os, fsname);
+	seq_puts(seq, fsname);
+	kmem_free(fsname, ZFS_MAX_DATASET_NAME_LEN);
+
+	return (0);
+}
+
+static int
+zpl_show_devname(struct seq_file *seq, struct dentry *root)
+{
+	return (__zpl_show_devname(seq, root->d_sb->s_fs_info));
 }
 
 static int
@@ -314,6 +333,7 @@ const struct super_operations zpl_super_operations = {
 	.sync_fs		= zpl_sync_fs,
 	.statfs			= zpl_statfs,
 	.remount_fs		= zpl_remount_fs,
+	.show_devname		= zpl_show_devname,
 	.show_options		= zpl_show_options,
 	.show_stats		= NULL,
 };

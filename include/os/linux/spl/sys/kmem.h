@@ -28,12 +28,14 @@
 #include <sys/debug.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
+#include <linux/vmalloc.h>
 
 extern int kmem_debugging(void);
 extern char *kmem_vasprintf(const char *fmt, va_list ap);
 extern char *kmem_asprintf(const char *fmt, ...);
-extern char *strdup(const char *str);
-extern void strfree(char *str);
+extern char *kmem_strdup(const char *str);
+extern void kmem_strfree(char *str);
 
 /*
  * Memory allocation interfaces
@@ -47,6 +49,7 @@ extern void strfree(char *str);
 #define	KM_PUBLIC_MASK	(KM_SLEEP | KM_NOSLEEP | KM_PUSHPAGE)
 
 static int spl_fstrans_check(void);
+void *spl_kvmalloc(size_t size, gfp_t flags);
 
 /*
  * Convert a KM_* flags mask to its Linux GFP_* counterpart.  The conversion
@@ -141,6 +144,18 @@ __spl_pf_fstrans_check(void)
 	return (current->flags & __SPL_PF_FSTRANS);
 }
 
+/*
+ * Kernel compatibility for GFP flags
+ */
+/* < 4.13 */
+#ifndef __GFP_RETRY_MAYFAIL
+#define	__GFP_RETRY_MAYFAIL	__GFP_REPEAT
+#endif
+/* < 4.4 */
+#ifndef __GFP_RECLAIM
+#define	__GFP_RECLAIM		__GFP_WAIT
+#endif
+
 #ifdef HAVE_ATOMIC64_T
 #define	kmem_alloc_used_add(size)	atomic64_add(size, &kmem_alloc_used)
 #define	kmem_alloc_used_sub(size)	atomic64_sub(size, &kmem_alloc_used)
@@ -168,6 +183,15 @@ extern unsigned int spl_kmem_alloc_max;
 extern void *spl_kmem_alloc(size_t sz, int fl, const char *func, int line);
 extern void *spl_kmem_zalloc(size_t sz, int fl, const char *func, int line);
 extern void spl_kmem_free(const void *ptr, size_t sz);
+
+/*
+ * 5.8 API change, pgprot_t argument removed.
+ */
+#ifdef HAVE_VMALLOC_PAGE_KERNEL
+#define	spl_vmalloc(size, flags)	__vmalloc(size, flags, PAGE_KERNEL)
+#else
+#define	spl_vmalloc(size, flags)	__vmalloc(size, flags)
+#endif
 
 /*
  * The following functions are only available for internal use.

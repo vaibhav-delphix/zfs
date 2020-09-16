@@ -135,8 +135,6 @@ unsigned long zil_slog_bulk = 768 * 1024;
 static kmem_cache_t *zil_lwb_cache;
 static kmem_cache_t *zil_zcw_cache;
 
-static void zil_async_to_sync(zilog_t *zilog, uint64_t foid);
-
 #define	LWB_EMPTY(lwb) ((BP_GET_LSIZE(&lwb->lwb_blk) - \
     sizeof (zil_chain_t)) == (lwb->lwb_sz - lwb->lwb_nused))
 
@@ -604,7 +602,7 @@ zil_free_lwb(zilog_t *zilog, lwb_t *lwb)
  * Called when we create in-memory log transactions so that we know
  * to cleanup the itxs at the end of spa_sync().
  */
-void
+static void
 zilog_dirty(zilog_t *zilog, uint64_t txg)
 {
 	dsl_pool_t *dp = zilog->zl_dmu_pool;
@@ -630,7 +628,7 @@ zilog_dirty(zilog_t *zilog, uint64_t txg)
  * dirtied (zil_itx_assign) or cleaned (zil_clean) while we check its current
  * state.
  */
-boolean_t
+static boolean_t __maybe_unused
 zilog_is_dirty_in_txg(zilog_t *zilog, uint64_t txg)
 {
 	dsl_pool_t *dp = zilog->zl_dmu_pool;
@@ -644,7 +642,7 @@ zilog_is_dirty_in_txg(zilog_t *zilog, uint64_t txg)
  * Determine if the zil is dirty. The zil is considered dirty if it has
  * any pending itx records that have not been cleaned by zil_clean().
  */
-boolean_t
+static boolean_t
 zilog_is_dirty(zilog_t *zilog)
 {
 	dsl_pool_t *dp = zilog->zl_dmu_pool;
@@ -1416,11 +1414,17 @@ zil_lwb_write_open(zilog_t *zilog, lwb_t *lwb)
  * aligned to 4KB) actually gets written. However, we can't always just
  * allocate SPA_OLD_MAXBLOCKSIZE as the slog space could be exhausted.
  */
-uint64_t zil_block_buckets[] = {
-    4096,		/* non TX_WRITE */
-    8192+4096,		/* data base */
-    32*1024 + 4096, 	/* NFS writes */
-    UINT64_MAX
+struct {
+	uint64_t	limit;
+	uint64_t	blksz;
+} zil_block_buckets[] = {
+	{ 4096,		4096 },			/* non TX_WRITE */
+	{ 8192 + 4096,	8192 + 4096 },		/* database */
+	{ 32768 + 4096,	32768 + 4096 },		/* NFS writes */
+	{ 65536 + 4096,	65536 + 4096 },		/* 64KB writes */
+	{ 131072,	131072 },		/* < 128KB writes */
+	{ 131072 +4096,	65536 + 4096 },		/* 128KB writes */
+	{ UINT64_MAX,	SPA_OLD_MAXBLOCKSIZE},	/* > 128KB writes */
 };
 
 /*
@@ -1504,9 +1508,9 @@ zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
 	 * pool log space.
 	 */
 	zil_blksz = zilog->zl_cur_used + sizeof (zil_chain_t);
-	for (i = 0; zil_blksz > zil_block_buckets[i]; i++)
+	for (i = 0; zil_blksz > zil_block_buckets[i].limit; i++)
 		continue;
-	zil_blksz = MIN(zil_block_buckets[i], zilog->zl_max_block_size);
+	zil_blksz = MIN(zil_block_buckets[i].blksz, zilog->zl_max_block_size);
 	zilog->zl_prev_blks[zilog->zl_prev_rotor] = zil_blksz;
 	for (i = 0; i < ZIL_PREV_BLKS; i++)
 		zil_blksz = MAX(zil_blksz, zilog->zl_prev_blks[i]);
@@ -2089,7 +2093,7 @@ zil_get_commit_list(zilog_t *zilog)
 /*
  * Move the async itxs for a specified object to commit into sync lists.
  */
-static void
+void
 zil_async_to_sync(zilog_t *zilog, uint64_t foid)
 {
 	uint64_t otxg, txg;
@@ -2683,11 +2687,11 @@ zil_commit_waiter(zilog_t *zilog, zil_commit_waiter_t *zcw)
 			 * timeout is reached; responsibility (2) from
 			 * the comment above this function.
 			 */
-			clock_t timeleft = cv_timedwait_hires(&zcw->zcw_cv,
+			int rc = cv_timedwait_hires(&zcw->zcw_cv,
 			    &zcw->zcw_lock, wakeup, USEC2NSEC(1),
 			    CALLOUT_FLAG_ABSOLUTE);
 
-			if (timeleft >= 0 || zcw->zcw_done)
+			if (rc != -1 || zcw->zcw_done)
 				continue;
 
 			timedout = B_TRUE;

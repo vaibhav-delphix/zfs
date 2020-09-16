@@ -56,9 +56,7 @@ function cleanup
 	fi
 
 	for pool in $TESTPOOL1 $TESTPOOL; do
-		if poolexists $pool; then
-			destroy_pool $pool
-		fi
+		poolexists $pool && destroy_pool $pool
 	done
 }
 
@@ -72,11 +70,16 @@ log_onexit cleanup
 # use zfs vol device in swap to create pool which should fail.
 #
 create_pool $TESTPOOL $DISK0
-log_must zfs create -V 100m $vol_name
+log_must zfs create -V 75m $vol_name
 block_device_wait
 swap_setup ${ZVOL_DEVDIR}/$vol_name
 
-for opt in "-n" "" "-f"; do
+if is_freebsd; then
+	typeset -a opts=("" "-f")
+else
+	typeset -a opts=("-n" "" "-f")
+fi
+for opt in "${opts[@]}"; do
 	log_mustnot zpool create $opt $TESTPOOL1 ${ZVOL_DEVDIR}/${vol_name}
 done
 

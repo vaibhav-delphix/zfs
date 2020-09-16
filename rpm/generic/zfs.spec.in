@@ -48,10 +48,15 @@
 %global _systemdgeneratordir %{_prefix}/lib/systemd/system-generators
 %endif
 
+%if %{undefined _pkgconfigdir}
+%global _pkgconfigdir %{_prefix}/%{_lib}/pkgconfig
+%endif
+
 %bcond_with    debug
 %bcond_with    debuginfo
 %bcond_with    asan
 %bcond_with    systemd
+%bcond_with    pam
 
 # Generic enable switch for systemd
 %if %{with systemd}
@@ -112,7 +117,7 @@ Summary:        Commands to control the kernel modules and libraries
 
 Group:          System Environment/Kernel
 License:        @ZFS_META_LICENSE@
-URL:            http://zfsonlinux.org/
+URL:            https://zfsonlinux.org/
 Source0:        %{name}-%{version}.tar.gz
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 Requires:       libzpool2 = %{version}
@@ -329,6 +334,12 @@ image which is ZFS aware.
     %define pyzfs --disable-pyzfs
 %endif
 
+%if %{with pam}
+    %define pam --enable-pam
+%else
+    %define pam --disable-pam
+%endif
+
 %setup -q
 
 %build
@@ -337,12 +348,16 @@ image which is ZFS aware.
     --with-udevdir=%{_udevdir} \
     --with-udevruledir=%{_udevruledir} \
     --with-dracutdir=%{_dracutdir} \
+    --with-pamconfigsdir=%{_datadir}/pam-configs \
+    --with-pammoduledir=%{_libdir}/security \
     --with-python=%{__python} \
+    --with-pkgconfigdir=%{_pkgconfigdir} \
     --disable-static \
     %{debug} \
     %{debuginfo} \
     %{asan} \
-    %{systemd}\
+    %{systemd} \
+    %{pam} \
     %{pyzfs}
 make %{?_smp_mflags}
 
@@ -403,6 +418,7 @@ fi
 if [ "$1" = "0" -o "$1" = "remove" ] && [ -x /sbin/chkconfig ]; then
     /sbin/chkconfig --del zfs-import
     /sbin/chkconfig --del zfs-mount
+    /sbin/chkconfig --del zfs-share
     /sbin/chkconfig --del zfs-zed
 fi
 %endif
@@ -456,6 +472,10 @@ systemctl --system daemon-reload >/dev/null || true
 %config(noreplace) %{_sysconfdir}/%{name}/zpool.d/*
 %config(noreplace) %{_sysconfdir}/%{name}/vdev_id.conf.*.example
 %attr(440, root, root) %config(noreplace) %{_sysconfdir}/sudoers.d/*
+%if %{with pam}
+%{_libdir}/security/*
+%{_datadir}/pam-configs/*
+%endif
 
 %files -n libzpool2
 %{_libdir}/libzpool.so.*
@@ -470,8 +490,8 @@ systemctl --system daemon-reload >/dev/null || true
 %{_libdir}/libzfs*.so.*
 
 %files -n libzfs2-devel
-%{_datarootdir}/pkgconfig/libzfs.pc
-%{_datarootdir}/pkgconfig/libzfs_core.pc
+%{_pkgconfigdir}/libzfs.pc
+%{_pkgconfigdir}/libzfs_core.pc
 %{_libdir}/*.so
 %{_includedir}/*
 %doc AUTHORS COPYRIGHT LICENSE NOTICE README.md

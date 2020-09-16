@@ -26,7 +26,6 @@
 #include <sys/sysmacros.h>
 #include <sys/kmem.h>
 #include <sys/vmem.h>
-#include <linux/mm.h>
 
 /*
  * As a general rule kmem_alloc() allocations should be small, preferably
@@ -120,18 +119,81 @@ __strdup(const char *str, int flags)
 }
 
 char *
-strdup(const char *str)
+kmem_strdup(const char *str)
 {
 	return (__strdup(str, KM_SLEEP));
 }
-EXPORT_SYMBOL(strdup);
+EXPORT_SYMBOL(kmem_strdup);
 
 void
-strfree(char *str)
+kmem_strfree(char *str)
 {
 	kfree(str);
 }
-EXPORT_SYMBOL(strfree);
+EXPORT_SYMBOL(kmem_strfree);
+
+void *
+spl_kvmalloc(size_t size, gfp_t lflags)
+{
+#ifdef HAVE_KVMALLOC
+	/*
+	 * GFP_KERNEL allocations can safely use kvmalloc which may
+	 * improve performance by avoiding a) high latency caused by
+	 * vmalloc's on-access allocation, b) performance loss due to
+	 * MMU memory address mapping and c) vmalloc locking overhead.
+	 * This has the side-effect that the slab statistics will
+	 * incorrectly report this as a vmem allocation, but that is
+	 * purely cosmetic.
+	 */
+	if ((lflags & GFP_KERNEL) == GFP_KERNEL)
+		return (kvmalloc(size, lflags));
+#endif
+
+	gfp_t kmalloc_lflags = lflags;
+
+	if (size > PAGE_SIZE) {
+		/*
+		 * We need to set __GFP_NOWARN here since spl_kvmalloc is not
+		 * only called by spl_kmem_alloc_impl but can be called
+		 * directly with custom lflags, too. In that case
+		 * kmem_flags_convert does not get called, which would
+		 * implicitly set __GFP_NOWARN.
+		 */
+		kmalloc_lflags |= __GFP_NOWARN;
+
+		/*
+		 * N.B. __GFP_RETRY_MAYFAIL is supported only for large
+		 * e (>32kB) allocations.
+		 *
+		 * We have to override __GFP_RETRY_MAYFAIL by __GFP_NORETRY
+		 * for !costly requests because there is no other way to tell
+		 * the allocator that we want to fail rather than retry
+		 * endlessly.
+		 */
+		if (!(kmalloc_lflags & __GFP_RETRY_MAYFAIL) ||
+		    (size <= PAGE_SIZE << PAGE_ALLOC_COSTLY_ORDER)) {
+			kmalloc_lflags |= __GFP_NORETRY;
+		}
+	}
+
+	/*
+	 * We first try kmalloc - even for big sizes - and fall back to
+	 * spl_vmalloc if that fails.
+	 *
+	 * For non-__GFP-RECLAIM allocations we always stick to
+	 * kmalloc_node, and fail when kmalloc is not successful (returns
+	 * NULL).
+	 * We cannot fall back to spl_vmalloc in this case because spl_vmalloc
+	 * internally uses GPF_KERNEL allocations.
+	 */
+	void *ptr = kmalloc_node(size, kmalloc_lflags, NUMA_NO_NODE);
+	if (ptr || size <= PAGE_SIZE ||
+	    (lflags & __GFP_RECLAIM) != __GFP_RECLAIM) {
+		return (ptr);
+	}
+
+	return (spl_vmalloc(size, lflags | __GFP_HIGHMEM));
+}
 
 /*
  * General purpose unified implementation of kmem_alloc(). It is an
@@ -144,7 +206,6 @@ inline void *
 spl_kmem_alloc_impl(size_t size, int flags, int node)
 {
 	gfp_t lflags = kmem_flags_convert(flags);
-	int use_vmem = 0;
 	void *ptr;
 
 	/*
@@ -172,34 +233,35 @@ spl_kmem_alloc_impl(size_t size, int flags, int node)
 		 * kmem_zalloc() callers.
 		 *
 		 * For vmem_alloc() and vmem_zalloc() callers it is permissible
-		 * to use __vmalloc().  However, in general use of __vmalloc()
-		 * is strongly discouraged because a global lock must be
-		 * acquired.  Contention on this lock can significantly
+		 * to use spl_vmalloc().  However, in general use of
+		 * spl_vmalloc() is strongly discouraged because a global lock
+		 * must be acquired.  Contention on this lock can significantly
 		 * impact performance so frequently manipulating the virtual
 		 * address space is strongly discouraged.
 		 */
-		if ((size > spl_kmem_alloc_max) || use_vmem) {
+		if (size > spl_kmem_alloc_max) {
 			if (flags & KM_VMEM) {
-				ptr = __vmalloc(size, lflags | __GFP_HIGHMEM,
-				    PAGE_KERNEL);
+				ptr = spl_vmalloc(size, lflags | __GFP_HIGHMEM);
 			} else {
 				return (NULL);
 			}
 		} else {
-			ptr = kmalloc_node(size, lflags, node);
+			if (flags & KM_VMEM) {
+				ptr = spl_kvmalloc(size, lflags);
+			} else {
+				ptr = kmalloc_node(size, lflags, node);
+			}
 		}
 
 		if (likely(ptr) || (flags & KM_NOSLEEP))
 			return (ptr);
 
 		/*
-		 * For vmem_alloc() and vmem_zalloc() callers retry immediately
-		 * using __vmalloc() which is unlikely to fail.
+		 * Try hard to satisfy the allocation. However, when progress
+		 * cannot be made, the allocation is allowed to fail.
 		 */
-		if ((flags & KM_VMEM) && (use_vmem == 0))  {
-			use_vmem = 1;
-			continue;
-		}
+		if ((lflags & GFP_KERNEL) == GFP_KERNEL)
+			lflags |= __GFP_RETRY_MAYFAIL;
 
 		/*
 		 * Use cond_resched() instead of congestion_wait() to avoid
@@ -303,7 +365,7 @@ kmem_del_init(spinlock_t *lock, struct hlist_head *table,
     int bits, const void *addr)
 {
 	struct hlist_head *head;
-	struct hlist_node *node;
+	struct hlist_node *node = NULL;
 	struct kmem_debug *p;
 	unsigned long flags;
 
@@ -500,7 +562,7 @@ static void
 spl_kmem_fini_tracking(struct list_head *list, spinlock_t *lock)
 {
 	unsigned long flags;
-	kmem_debug_t *kd;
+	kmem_debug_t *kd = NULL;
 	char str[17];
 
 	spin_lock_irqsave(lock, flags);

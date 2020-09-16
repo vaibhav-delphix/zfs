@@ -39,7 +39,6 @@
 #include <sys/byteorder.h>
 #include <sys/policy.h>
 #include <sys/stat.h>
-#include <sys/mode.h>
 #include <sys/acl.h>
 #include <sys/dmu.h>
 #include <sys/dbuf.h>
@@ -232,7 +231,33 @@ zfs_xattr_owner_unlinked(znode_t *zp)
 {
 	int unlinked = 0;
 	znode_t *dzp;
-	igrab(ZTOI(zp));
+#ifdef __FreeBSD__
+	znode_t *tzp = zp;
+
+	/*
+	 * zrele drops the vnode lock which violates the VOP locking contract
+	 * on FreeBSD. See comment at the top of zfs_replay.c for more detail.
+	 */
+	/*
+	 * if zp is XATTR node, keep walking up via z_xattr_parent until we
+	 * get the owner
+	 */
+	while (tzp->z_pflags & ZFS_XATTR) {
+		ASSERT3U(zp->z_xattr_parent, !=, 0);
+		if (zfs_zget(ZTOZSB(tzp), tzp->z_xattr_parent, &dzp) != 0) {
+			unlinked = 1;
+			break;
+		}
+
+		if (tzp != zp)
+			zrele(tzp);
+		tzp = dzp;
+		unlinked = tzp->z_unlinked;
+	}
+	if (tzp != zp)
+		zrele(tzp);
+#else
+	zhold(zp);
 	/*
 	 * if zp is XATTR node, keep walking up via z_xattr_parent until we
 	 * get the owner
@@ -243,11 +268,13 @@ zfs_xattr_owner_unlinked(znode_t *zp)
 			unlinked = 1;
 			break;
 		}
-		iput(ZTOI(zp));
+
+		zrele(zp);
 		zp = dzp;
 		unlinked = zp->z_unlinked;
 	}
-	iput(ZTOI(zp));
+	zrele(zp);
+#endif
 	return (unlinked);
 }
 
@@ -322,13 +349,13 @@ zfs_log_create(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 	/* Store dnode slot count in 8 bits above object id. */
 	LR_FOID_SET_SLOTS(lr->lr_foid, zp->z_dnodesize >> DNODE_SHIFT);
 	lr->lr_mode = zp->z_mode;
-	if (!IS_EPHEMERAL(KUID_TO_SUID(ZTOI(zp)->i_uid))) {
-		lr->lr_uid = (uint64_t)KUID_TO_SUID(ZTOI(zp)->i_uid);
+	if (!IS_EPHEMERAL(KUID_TO_SUID(ZTOUID(zp)))) {
+		lr->lr_uid = (uint64_t)KUID_TO_SUID(ZTOUID(zp));
 	} else {
 		lr->lr_uid = fuidp->z_fuid_owner;
 	}
-	if (!IS_EPHEMERAL(KGID_TO_SGID(ZTOI(zp)->i_gid))) {
-		lr->lr_gid = (uint64_t)KGID_TO_SGID(ZTOI(zp)->i_gid);
+	if (!IS_EPHEMERAL(KGID_TO_SGID(ZTOGID(zp)))) {
+		lr->lr_gid = (uint64_t)KGID_TO_SGID(ZTOGID(zp));
 	} else {
 		lr->lr_gid = fuidp->z_fuid_group;
 	}
@@ -380,8 +407,6 @@ zfs_log_create(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 
 	zil_itx_assign(zilog, itx, tx);
 }
-
-void zil_remove_async(zilog_t *zilog, uint64_t oid);
 
 /*
  * Handles both TX_REMOVE and TX_RMDIR transactions.
@@ -460,8 +485,8 @@ zfs_log_symlink(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 	lr = (lr_create_t *)&itx->itx_lr;
 	lr->lr_doid = dzp->z_id;
 	lr->lr_foid = zp->z_id;
-	lr->lr_uid = KUID_TO_SUID(ZTOI(zp)->i_uid);
-	lr->lr_gid = KGID_TO_SGID(ZTOI(zp)->i_gid);
+	lr->lr_uid = KUID_TO_SUID(ZTOUID(zp));
+	lr->lr_gid = KGID_TO_SGID(ZTOGID(zp));
 	lr->lr_mode = zp->z_mode;
 	(void) sa_lookup(zp->z_sa_hdl, SA_ZPL_GEN(ZTOZSB(zp)), &lr->lr_gen,
 	    sizeof (uint64_t));
@@ -528,7 +553,7 @@ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 	else if (!spa_has_log_device(zilog->zl_spa) &&
 	    resid >= zfs_immediate_write_sz)
 		write_state = WR_INDIRECT;
-	else if (ioflag & (FSYNC | FDSYNC))
+	else if (ioflag & (O_SYNC | O_DSYNC))
 		write_state = WR_COPIED;
 	else
 		write_state = WR_NEED_COPY;
@@ -578,7 +603,7 @@ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 
 		itx->itx_private = ZTOZSB(zp);
 
-		if (!(ioflag & (FSYNC | FDSYNC)) && (zp->z_sync_cnt == 0) &&
+		if (!(ioflag & (O_SYNC | O_DSYNC)) && (zp->z_sync_cnt == 0) &&
 		    (fsync_cnt == 0))
 			itx->itx_sync = B_FALSE;
 

@@ -26,6 +26,7 @@
  * Copyright 2013 Saso Kiselkov. All rights reserved.
  * Copyright (c) 2017 Datto Inc.
  * Copyright (c) 2017, Intel Corporation.
+ * Copyright (c) 2019, loli10K <ezomori.nozomu@gmail.com>. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -61,6 +62,7 @@
 #include <sys/btree.h>
 #include <sys/zfeature.h>
 #include <sys/qat.h>
+#include <sys/zstd/zstd.h>
 
 /*
  * SPA locking
@@ -241,7 +243,7 @@ static kmutex_t spa_l2cache_lock;
 static avl_tree_t spa_l2cache_avl;
 
 kmem_cache_t *spa_buffer_pool;
-int spa_mode_global;
+spa_mode_t spa_mode_global = SPA_MODE_UNINIT;
 
 #ifdef ZFS_DEBUG
 /*
@@ -302,20 +304,20 @@ int zfs_free_leak_on_eio = B_FALSE;
  * has not completed in zfs_deadman_synctime_ms is considered "hung" resulting
  * in one of three behaviors controlled by zfs_deadman_failmode.
  */
-unsigned long zfs_deadman_synctime_ms = 600000ULL;
+unsigned long zfs_deadman_synctime_ms = 600000UL;
 
 /*
  * This value controls the maximum amount of time zio_wait() will block for an
  * outstanding IO.  By default this is 300 seconds at which point the "hung"
  * behavior will be applied as described for zfs_deadman_synctime_ms.
  */
-unsigned long zfs_deadman_ziotime_ms = 300000ULL;
+unsigned long zfs_deadman_ziotime_ms = 300000UL;
 
 /*
  * Check time in milliseconds. This defines the frequency at which we check
  * for hung I/O.
  */
-unsigned long zfs_deadman_checktime_ms = 60000ULL;
+unsigned long zfs_deadman_checktime_ms = 60000UL;
 
 /*
  * By default the deadman is enabled.
@@ -614,7 +616,7 @@ spa_deadman(void *arg)
 	    MSEC_TO_TICK(zfs_deadman_checktime_ms));
 }
 
-int
+static int
 spa_log_sm_sort_by_txg(const void *va, const void *vb)
 {
 	const spa_log_sm_t *a = va;
@@ -943,7 +945,7 @@ spa_aux_compare(const void *a, const void *b)
 	return (TREE_CMP(sa->aux_guid, sb->aux_guid));
 }
 
-void
+static void
 spa_aux_add(vdev_t *vd, avl_tree_t *avl)
 {
 	avl_index_t where;
@@ -961,7 +963,7 @@ spa_aux_add(vdev_t *vd, avl_tree_t *avl)
 	}
 }
 
-void
+static void
 spa_aux_remove(vdev_t *vd, avl_tree_t *avl)
 {
 	spa_aux_t search;
@@ -981,7 +983,7 @@ spa_aux_remove(vdev_t *vd, avl_tree_t *avl)
 	}
 }
 
-boolean_t
+static boolean_t
 spa_aux_exists(uint64_t guid, uint64_t *pool, int *refcnt, avl_tree_t *avl)
 {
 	spa_aux_t search, *found;
@@ -1006,7 +1008,7 @@ spa_aux_exists(uint64_t guid, uint64_t *pool, int *refcnt, avl_tree_t *avl)
 	return (found != NULL);
 }
 
-void
+static void
 spa_aux_activate(vdev_t *vd, avl_tree_t *avl)
 {
 	spa_aux_t search, *found;
@@ -1165,6 +1167,30 @@ spa_vdev_enter(spa_t *spa)
 }
 
 /*
+ * The same as spa_vdev_enter() above but additionally takes the guid of
+ * the vdev being detached.  When there is a rebuild in process it will be
+ * suspended while the vdev tree is modified then resumed by spa_vdev_exit().
+ * The rebuild is canceled if only a single child remains after the detach.
+ */
+uint64_t
+spa_vdev_detach_enter(spa_t *spa, uint64_t guid)
+{
+	mutex_enter(&spa->spa_vdev_top_lock);
+	mutex_enter(&spa_namespace_lock);
+
+	vdev_autotrim_stop_all(spa);
+
+	if (guid != 0) {
+		vdev_t *vd = spa_lookup_by_guid(spa, guid, B_FALSE);
+		if (vd) {
+			vdev_rebuild_stop_wait(vd->vdev_top);
+		}
+	}
+
+	return (spa_vdev_config_enter(spa));
+}
+
+/*
  * Internal implementation for spa_vdev_enter().  Used when a vdev
  * operation requires multiple syncs (i.e. removing a device) while
  * keeping the spa_namespace_lock held.
@@ -1197,7 +1223,7 @@ spa_vdev_config_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error, char *tag)
 	/*
 	 * Reassess the DTLs.
 	 */
-	vdev_dtl_reassess(spa->spa_root_vdev, 0, 0, B_FALSE);
+	vdev_dtl_reassess(spa->spa_root_vdev, 0, 0, B_FALSE, B_FALSE);
 
 	if (error == 0 && !list_is_empty(&spa->spa_config_dirty_list)) {
 		config_changed = B_TRUE;
@@ -1270,6 +1296,7 @@ int
 spa_vdev_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error)
 {
 	vdev_autotrim_restart(spa);
+	vdev_rebuild_restart(spa);
 
 	spa_vdev_config_exit(spa, vd, txg, error, FTAG);
 	mutex_exit(&spa_namespace_lock);
@@ -1321,7 +1348,7 @@ spa_vdev_state_exit(spa_t *spa, vdev_t *vd, int error)
 	}
 
 	if (vd != NULL || error == 0)
-		vdev_dtl_reassess(vdev_top, 0, 0, B_FALSE);
+		vdev_dtl_reassess(vdev_top, 0, 0, B_FALSE, B_FALSE);
 
 	if (vd != NULL) {
 		if (vd != spa->spa_root_vdev)
@@ -2009,6 +2036,32 @@ spa_set_deadman_failmode(spa_t *spa, const char *failmode)
 		spa->spa_deadman_failmode = ZIO_FAILURE_MODE_WAIT;
 }
 
+void
+spa_set_deadman_ziotime(hrtime_t ns)
+{
+	spa_t *spa = NULL;
+
+	if (spa_mode_global != SPA_MODE_UNINIT) {
+		mutex_enter(&spa_namespace_lock);
+		while ((spa = spa_next(spa)) != NULL)
+			spa->spa_deadman_ziotime = ns;
+		mutex_exit(&spa_namespace_lock);
+	}
+}
+
+void
+spa_set_deadman_synctime(hrtime_t ns)
+{
+	spa_t *spa = NULL;
+
+	if (spa_mode_global != SPA_MODE_UNINIT) {
+		mutex_enter(&spa_namespace_lock);
+		while ((spa = spa_next(spa)) != NULL)
+			spa->spa_deadman_synctime = ns;
+		mutex_exit(&spa_namespace_lock);
+	}
+}
+
 uint64_t
 dva_get_dsize_sync(spa_t *spa, const dva_t *dva)
 {
@@ -2292,7 +2345,7 @@ spa_boot_init(void)
 }
 
 void
-spa_init(int mode)
+spa_init(spa_mode_t mode)
 {
 	mutex_init(&spa_namespace_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&spa_spare_lock, NULL, MUTEX_DEFAULT, NULL);
@@ -2311,7 +2364,7 @@ spa_init(int mode)
 	spa_mode_global = mode;
 
 #ifndef _KERNEL
-	if (spa_mode_global != FREAD && dprintf_find_string("watch")) {
+	if (spa_mode_global != SPA_MODE_READ && dprintf_find_string("watch")) {
 		struct sigaction sa;
 
 		sa.sa_flags = SA_SIGINFO;
@@ -2416,7 +2469,7 @@ spa_is_root(spa_t *spa)
 boolean_t
 spa_writeable(spa_t *spa)
 {
-	return (!!(spa->spa_mode & FWRITE) && spa->spa_trust_config);
+	return (!!(spa->spa_mode & SPA_MODE_WRITE) && spa->spa_trust_config);
 }
 
 /*
@@ -2430,7 +2483,7 @@ spa_has_pending_synctask(spa_t *spa)
 	    !txg_all_lists_empty(&spa->spa_dsl_pool->dp_early_sync_tasks));
 }
 
-int
+spa_mode_t
 spa_mode(spa_t *spa)
 {
 	return (spa->spa_mode);
@@ -2680,7 +2733,7 @@ boolean_t
 spa_importing_readonly_checkpoint(spa_t *spa)
 {
 	return ((spa->spa_import_flags & ZFS_IMPORT_CHECKPOINT) &&
-	    spa->spa_mode == FREAD);
+	    spa->spa_mode == SPA_MODE_READ);
 }
 
 uint64_t
@@ -2718,94 +2771,31 @@ spa_suspend_async_destroy(spa_t *spa)
 
 #if defined(_KERNEL)
 
-static int
-param_set_deadman_failmode(const char *val, zfs_kernel_param_t *kp)
+int
+param_set_deadman_failmode_common(const char *val)
 {
 	spa_t *spa = NULL;
 	char *p;
 
 	if (val == NULL)
-		return (SET_ERROR(-EINVAL));
+		return (SET_ERROR(EINVAL));
 
 	if ((p = strchr(val, '\n')) != NULL)
 		*p = '\0';
 
 	if (strcmp(val, "wait") != 0 && strcmp(val, "continue") != 0 &&
 	    strcmp(val, "panic"))
-		return (SET_ERROR(-EINVAL));
+		return (SET_ERROR(EINVAL));
 
-	if (spa_mode_global != 0) {
+	if (spa_mode_global != SPA_MODE_UNINIT) {
 		mutex_enter(&spa_namespace_lock);
 		while ((spa = spa_next(spa)) != NULL)
 			spa_set_deadman_failmode(spa, val);
 		mutex_exit(&spa_namespace_lock);
 	}
 
-	return (param_set_charp(val, kp));
-}
-
-static int
-param_set_deadman_ziotime(const char *val, zfs_kernel_param_t *kp)
-{
-	spa_t *spa = NULL;
-	int error;
-
-	error = param_set_ulong(val, kp);
-	if (error < 0)
-		return (SET_ERROR(error));
-
-	if (spa_mode_global != 0) {
-		mutex_enter(&spa_namespace_lock);
-		while ((spa = spa_next(spa)) != NULL)
-			spa->spa_deadman_ziotime =
-			    MSEC2NSEC(zfs_deadman_ziotime_ms);
-		mutex_exit(&spa_namespace_lock);
-	}
-
 	return (0);
 }
-
-static int
-param_set_deadman_synctime(const char *val, zfs_kernel_param_t *kp)
-{
-	spa_t *spa = NULL;
-	int error;
-
-	error = param_set_ulong(val, kp);
-	if (error < 0)
-		return (SET_ERROR(error));
-
-	if (spa_mode_global != 0) {
-		mutex_enter(&spa_namespace_lock);
-		while ((spa = spa_next(spa)) != NULL)
-			spa->spa_deadman_synctime =
-			    MSEC2NSEC(zfs_deadman_synctime_ms);
-		mutex_exit(&spa_namespace_lock);
-	}
-
-	return (0);
-}
-
-static int
-param_set_slop_shift(const char *buf, zfs_kernel_param_t *kp)
-{
-	unsigned long val;
-	int error;
-
-	error = kstrtoul(buf, 0, &val);
-	if (error)
-		return (SET_ERROR(error));
-
-	if (val < 1 || val > 31)
-		return (SET_ERROR(-EINVAL));
-
-	error = param_set_int(buf, kp);
-	if (error < 0)
-		return (SET_ERROR(error));
-
-	return (0);
-}
-
 #endif
 
 /* Namespace manipulation */
@@ -2920,28 +2910,23 @@ ZFS_MODULE_PARAM(zfs, zfs_, ddt_data_is_special, INT, ZMOD_RW,
 ZFS_MODULE_PARAM(zfs, zfs_, user_indirect_is_special, INT, ZMOD_RW,
 	"Place user data indirect blocks into the special class");
 
-#ifdef _KERNEL
-module_param_call(zfs_deadman_synctime_ms, param_set_deadman_synctime,
-    param_get_ulong, &zfs_deadman_synctime_ms, 0644);
-MODULE_PARM_DESC(zfs_deadman_synctime_ms,
+/* BEGIN CSTYLED */
+ZFS_MODULE_PARAM_CALL(zfs_deadman, zfs_deadman_, failmode,
+	param_set_deadman_failmode, param_get_charp, ZMOD_RW,
+	"Failmode for deadman timer");
+
+ZFS_MODULE_PARAM_CALL(zfs_deadman, zfs_deadman_, synctime_ms,
+	param_set_deadman_synctime, param_get_ulong, ZMOD_RW,
 	"Pool sync expiration time in milliseconds");
 
-module_param_call(zfs_deadman_ziotime_ms, param_set_deadman_ziotime,
-    param_get_ulong, &zfs_deadman_ziotime_ms, 0644);
-MODULE_PARM_DESC(zfs_deadman_ziotime_ms,
+ZFS_MODULE_PARAM_CALL(zfs_deadman, zfs_deadman_, ziotime_ms,
+	param_set_deadman_ziotime, param_get_ulong, ZMOD_RW,
 	"IO expiration time in milliseconds");
 
-module_param_call(spa_slop_shift, param_set_slop_shift, param_get_int,
-	&spa_slop_shift, 0644);
-MODULE_PARM_DESC(spa_slop_shift, "Reserved free space in pool");
-
-module_param_call(zfs_deadman_failmode, param_set_deadman_failmode,
-	param_get_charp, &zfs_deadman_failmode, 0644);
-MODULE_PARM_DESC(zfs_deadman_failmode, "Failmode for deadman timer");
-#endif
-
-/* BEGIN CSTYLED */
 ZFS_MODULE_PARAM(zfs, zfs_, special_class_metadata_reserve_pct, INT, ZMOD_RW,
 	"Small file blocks in special vdevs depends on this much "
 	"free space available");
 /* END CSTYLED */
+
+ZFS_MODULE_PARAM_CALL(zfs_spa, spa_, slop_shift, param_set_slop_shift,
+	param_get_int, ZMOD_RW, "Reserved free space in pool");
