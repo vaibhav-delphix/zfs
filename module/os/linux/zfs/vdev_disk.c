@@ -436,6 +436,16 @@ vdev_submit_bio_impl(struct bio *bio)
 #endif
 }
 
+/*
+ * preempt_schedule_notrace is GPL-only which breaks the ZFS build, so
+ * replace it with preempt_schedule under the following condition:
+ */
+#if defined(CONFIG_ARM64) && \
+    defined(CONFIG_PREEMPTION) && \
+    defined(CONFIG_BLK_CGROUP)
+#define	preempt_schedule_notrace(x) preempt_schedule(x)
+#endif
+
 #ifdef HAVE_BIO_SET_DEV
 #if defined(CONFIG_BLK_CGROUP) && defined(HAVE_BIO_SET_DEV_GPL_ONLY)
 /*
@@ -458,7 +468,11 @@ vdev_blkg_tryget(struct blkcg_gq *blkg)
 		this_cpu_inc(*count);
 		rc = true;
 	} else {
+#ifdef ZFS_PERCPU_REF_COUNT_IN_DATA
+		rc = atomic_long_inc_not_zero(&ref->data->count);
+#else
 		rc = atomic_long_inc_not_zero(&ref->count);
+#endif
 	}
 
 	rcu_read_unlock_sched();
@@ -777,7 +791,7 @@ vdev_disk_io_done(zio_t *zio)
 		vdev_t *v = zio->io_vd;
 		vdev_disk_t *vd = v->vdev_tsd;
 
-		if (check_disk_change(vd->vd_bdev)) {
+		if (zfs_check_media_change(vd->vd_bdev)) {
 			invalidate_bdev(vd->vd_bdev);
 			v->vdev_remove_wanted = B_TRUE;
 			spa_async_request(zio->io_spa, SPA_ASYNC_REMOVE);
@@ -812,9 +826,13 @@ vdev_disk_rele(vdev_t *vd)
 }
 
 vdev_ops_t vdev_disk_ops = {
+	.vdev_op_init = NULL,
+	.vdev_op_fini = NULL,
 	.vdev_op_open = vdev_disk_open,
 	.vdev_op_close = vdev_disk_close,
 	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_min_asize = vdev_default_min_asize,
+	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_disk_io_start,
 	.vdev_op_io_done = vdev_disk_io_done,
 	.vdev_op_state_change = NULL,
@@ -823,6 +841,11 @@ vdev_ops_t vdev_disk_ops = {
 	.vdev_op_rele = vdev_disk_rele,
 	.vdev_op_remap = NULL,
 	.vdev_op_xlate = vdev_default_xlate,
+	.vdev_op_rebuild_asize = NULL,
+	.vdev_op_metaslab_init = NULL,
+	.vdev_op_config_generate = NULL,
+	.vdev_op_nparity = NULL,
+	.vdev_op_ndisks = NULL,
 	.vdev_op_type = VDEV_TYPE_DISK,		/* name of this vdev type */
 	.vdev_op_leaf = B_TRUE			/* leaf vdev */
 };

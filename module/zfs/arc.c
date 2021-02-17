@@ -308,6 +308,7 @@
 #include <sys/aggsum.h>
 #include <cityhash.h>
 #include <sys/vdev_trim.h>
+#include <sys/zstd/zstd.h>
 
 #ifndef _KERNEL
 /* set with ZFS_DEBUG=watch, to enable watchpoints on frozen buffers */
@@ -968,7 +969,7 @@ static void l2arc_log_blk_fetch_abort(zio_t *zio);
 
 /* L2ARC persistence block restoration routines. */
 static void l2arc_log_blk_restore(l2arc_dev_t *dev,
-    const l2arc_log_blk_phys_t *lb, uint64_t lb_asize, uint64_t lb_daddr);
+    const l2arc_log_blk_phys_t *lb, uint64_t lb_asize);
 static void l2arc_hdr_restore(const l2arc_log_ent_phys_t *le,
     l2arc_dev_t *dev);
 
@@ -4881,14 +4882,7 @@ arc_kmem_reap_soon(void)
 static boolean_t
 arc_evict_cb_check(void *arg, zthr_t *zthr)
 {
-	/*
-	 * This is necessary so that any changes which may have been made to
-	 * many of the zfs_arc_* module parameters will be propagated to
-	 * their actual internal variable counterparts. Without this,
-	 * changing those module params at runtime would have no effect.
-	 */
-	arc_tuning_update(B_FALSE);
-
+#ifdef ZFS_DEBUG
 	/*
 	 * This is necessary in order to keep the kstat information
 	 * up to date for tools that display kstat data such as the
@@ -4896,15 +4890,15 @@ arc_evict_cb_check(void *arg, zthr_t *zthr)
 	 * typically do not call kstat's update function, but simply
 	 * dump out stats from the most recent update.  Without
 	 * this call, these commands may show stale stats for the
-	 * anon, mru, mru_ghost, mfu, and mfu_ghost lists. Even
-	 * with this change, the data might be up to 1 second
-	 * out of date(the arc_evict_zthr has a maximum sleep
-	 * time of 1 second); but that should suffice.  The
-	 * arc_state_t structures can be queried directly if more
-	 * accurate information is needed.
+	 * anon, mru, mru_ghost, mfu, and mfu_ghost lists.  Even
+	 * with this call, the data might be out of date if the
+	 * evict thread hasn't been woken recently; but that should
+	 * suffice.  The arc_state_t structures can be queried
+	 * directly if more accurate information is needed.
 	 */
 	if (arc_ksp != NULL)
 		arc_ksp->ks_update(arc_ksp, KSTAT_READ);
+#endif
 
 	/*
 	 * We have to rely on arc_wait_for_eviction() to tell us when to
@@ -4972,6 +4966,7 @@ static boolean_t
 arc_reap_cb_check(void *arg, zthr_t *zthr)
 {
 	int64_t free_memory = arc_available_memory();
+	static int reap_cb_check_counter = 0;
 
 	/*
 	 * If a kmem reap is already active, don't schedule more.  We must
@@ -4995,6 +4990,14 @@ arc_reap_cb_check(void *arg, zthr_t *zthr)
 	} else if (gethrtime() >= arc_growtime) {
 		arc_no_grow = B_FALSE;
 	}
+
+	/*
+	 * Called unconditionally every 60 seconds to reclaim unused
+	 * zstd compression and decompression context. This is done
+	 * here to avoid the need for an independent thread.
+	 */
+	if (!((reap_cb_check_counter++) % 60))
+		zfs_zstd_cache_reap_now();
 
 	return (B_FALSE);
 }
@@ -5749,7 +5752,7 @@ arc_read_done(zio_t *zio)
 	 */
 	int callback_cnt = 0;
 	for (acb = callback_list; acb != NULL; acb = acb->acb_next) {
-		if (!acb->acb_done)
+		if (!acb->acb_done || acb->acb_nobuf)
 			continue;
 
 		callback_cnt++;
@@ -5914,6 +5917,7 @@ arc_read(zio_t *pio, spa_t *spa, const blkptr_t *bp,
 	boolean_t noauth_read = BP_IS_AUTHENTICATED(bp) &&
 	    (zio_flags & ZIO_FLAG_RAW_ENCRYPT) != 0;
 	boolean_t embedded_bp = !!BP_IS_EMBEDDED(bp);
+	boolean_t no_buf = *arc_flags & ARC_FLAG_NO_BUF;
 	int rc = 0;
 
 	ASSERT(!embedded_bp ||
@@ -5998,6 +6002,7 @@ top:
 				acb->acb_compressed = compressed_read;
 				acb->acb_encrypted = encrypted_read;
 				acb->acb_noauth = noauth_read;
+				acb->acb_nobuf = no_buf;
 				acb->acb_zb = *zb;
 				if (pio != NULL)
 					acb->acb_zio_dummy = zio_null(pio,
@@ -6007,8 +6012,6 @@ top:
 				acb->acb_zio_head = head_zio;
 				acb->acb_next = hdr->b_l1hdr.b_acb;
 				hdr->b_l1hdr.b_acb = acb;
-				mutex_exit(hash_lock);
-				goto out;
 			}
 			mutex_exit(hash_lock);
 			goto out;
@@ -6017,7 +6020,7 @@ top:
 		ASSERT(hdr->b_l1hdr.b_state == arc_mru ||
 		    hdr->b_l1hdr.b_state == arc_mfu);
 
-		if (done) {
+		if (done && !no_buf) {
 			if (hdr->b_flags & ARC_FLAG_PREDICTIVE_PREFETCH) {
 				/*
 				 * This is a demand read which does not have to
@@ -6295,7 +6298,11 @@ top:
 			    metadata, misses);
 		}
 
-		if (vd != NULL && l2arc_ndev != 0 && !(l2arc_norw && devw)) {
+		/* Check if the spa even has l2 configured */
+		const boolean_t spa_has_l2 = l2arc_ndev != 0 &&
+		    spa->spa_l2cache.sav_count > 0;
+
+		if (vd != NULL && spa_has_l2 && !(l2arc_norw && devw)) {
 			/*
 			 * Read from the L2ARC if the following are true:
 			 * 1. The L2ARC vdev was previously cached.
@@ -6396,15 +6403,24 @@ top:
 		} else {
 			if (vd != NULL)
 				spa_config_exit(spa, SCL_L2ARC, vd);
+
 			/*
-			 * Skip ARC stat bump for block pointers with
-			 * embedded data. The data are read from the blkptr
-			 * itself via decode_embedded_bp_compressed().
+			 * Only a spa with l2 should contribute to l2
+			 * miss stats.  (Including the case of having a
+			 * faulted cache device - that's also a miss.)
 			 */
-			if (l2arc_ndev != 0 && !embedded_bp) {
-				DTRACE_PROBE1(l2arc__miss,
-				    arc_buf_hdr_t *, hdr);
-				ARCSTAT_BUMP(arcstat_l2_misses);
+			if (spa_has_l2) {
+				/*
+				 * Skip ARC stat bump for block pointers with
+				 * embedded data. The data are read from the
+				 * blkptr itself via
+				 * decode_embedded_bp_compressed().
+				 */
+				if (!embedded_bp) {
+					DTRACE_PROBE1(l2arc__miss,
+					    arc_buf_hdr_t *, hdr);
+					ARCSTAT_BUMP(arcstat_l2_misses);
+				}
 			}
 		}
 
@@ -7189,9 +7205,9 @@ arc_tempreserve_space(spa_t *spa, uint64_t reserve, uint64_t txg)
 	 */
 	uint64_t total_dirty = reserve + arc_tempreserve + anon_size;
 	uint64_t spa_dirty_anon = spa_dirty_data(spa);
-
-	if (total_dirty > arc_c * zfs_arc_dirty_limit_percent / 100 &&
-	    anon_size > arc_c * zfs_arc_anon_limit_percent / 100 &&
+	uint64_t rarc_c = arc_warm ? arc_c : arc_c_max;
+	if (total_dirty > rarc_c * zfs_arc_dirty_limit_percent / 100 &&
+	    anon_size > rarc_c * zfs_arc_anon_limit_percent / 100 &&
 	    spa_dirty_anon > anon_size * zfs_arc_pool_dirty_percent / 100) {
 #ifdef ZFS_DEBUG
 		uint64_t meta_esize = zfs_refcount_count(
@@ -7199,9 +7215,9 @@ arc_tempreserve_space(spa_t *spa, uint64_t reserve, uint64_t txg)
 		uint64_t data_esize =
 		    zfs_refcount_count(&arc_anon->arcs_esize[ARC_BUFC_DATA]);
 		dprintf("failing, arc_tempreserve=%lluK anon_meta=%lluK "
-		    "anon_data=%lluK tempreserve=%lluK arc_c=%lluK\n",
+		    "anon_data=%lluK tempreserve=%lluK rarc_c=%lluK\n",
 		    arc_tempreserve >> 10, meta_esize >> 10,
-		    data_esize >> 10, reserve >> 10, arc_c >> 10);
+		    data_esize >> 10, reserve >> 10, rarc_c >> 10);
 #endif
 		DMU_TX_STAT_BUMP(dmu_tx_dirty_throttle);
 		return (SET_ERROR(ERESTART));
@@ -7652,8 +7668,8 @@ arc_init(void)
 		kstat_install(arc_ksp);
 	}
 
-	arc_evict_zthr = zthr_create_timer("arc_evict",
-	    arc_evict_cb_check, arc_evict_cb, NULL, SEC2NSEC(1));
+	arc_evict_zthr = zthr_create("arc_evict",
+	    arc_evict_cb_check, arc_evict_cb, NULL);
 	arc_reap_zthr = zthr_create_timer("arc_reap",
 	    arc_reap_cb_check, arc_reap_cb, NULL, SEC2NSEC(1));
 
@@ -8873,9 +8889,16 @@ out:
 		goto top;
 	}
 
-	ASSERT3U(dev->l2ad_hand + distance, <, dev->l2ad_end);
-	if (!dev->l2ad_first)
-		ASSERT3U(dev->l2ad_hand, <, dev->l2ad_evict);
+	if (!all) {
+		/*
+		 * In case of cache device removal (all) the following
+		 * assertions may be violated without functional consequences
+		 * as the device is about to be removed.
+		 */
+		ASSERT3U(dev->l2ad_hand + distance, <, dev->l2ad_end);
+		if (!dev->l2ad_first)
+			ASSERT3U(dev->l2ad_hand, <, dev->l2ad_evict);
+	}
 }
 
 /*
@@ -9505,8 +9528,6 @@ l2arc_rebuild_vdev(vdev_t *vd, boolean_t reopen)
 	l2arc_dev_hdr_phys_t	*l2dhdr;
 	uint64_t		l2dhdr_asize;
 	spa_t			*spa;
-	int			err;
-	boolean_t		l2dhdr_valid = B_TRUE;
 
 	dev = l2arc_vdev_get(vd);
 	ASSERT3P(dev, !=, NULL);
@@ -9535,10 +9556,7 @@ l2arc_rebuild_vdev(vdev_t *vd, boolean_t reopen)
 	/*
 	 * Read the device header, if an error is returned do not rebuild L2ARC.
 	 */
-	if ((err = l2arc_dev_hdr_read(dev)) != 0)
-		l2dhdr_valid = B_FALSE;
-
-	if (l2dhdr_valid && dev->l2ad_log_entries > 0) {
+	if (l2arc_dev_hdr_read(dev) == 0 && dev->l2ad_log_entries > 0) {
 		/*
 		 * If we are onlining a cache device (vdev_reopen) that was
 		 * still present (l2arc_vdev_present()) and rebuild is enabled,
@@ -9838,7 +9856,7 @@ l2arc_rebuild(l2arc_dev_t *dev)
 		 * L2BLK_GET_PSIZE returns aligned size for log blocks.
 		 */
 		uint64_t asize = L2BLK_GET_PSIZE((&lbps[0])->lbp_prop);
-		l2arc_log_blk_restore(dev, this_lb, asize, lbps[0].lbp_daddr);
+		l2arc_log_blk_restore(dev, this_lb, asize);
 
 		/*
 		 * log block restored, include its pointer in the list of
@@ -9885,6 +9903,7 @@ l2arc_rebuild(l2arc_dev_t *dev)
 		    !dev->l2ad_first)
 			goto out;
 
+		cond_resched();
 		for (;;) {
 			mutex_enter(&l2arc_rebuild_thr_lock);
 			if (dev->l2ad_rebuild_cancel) {
@@ -9918,7 +9937,7 @@ l2arc_rebuild(l2arc_dev_t *dev)
 		PTR_SWAP(this_lb, next_lb);
 		this_io = next_io;
 		next_io = NULL;
-		}
+	}
 
 	if (this_io != NULL)
 		l2arc_log_blk_fetch_abort(this_io);
@@ -9985,7 +10004,7 @@ l2arc_dev_hdr_read(l2arc_dev_t *dev)
 
 	err = zio_wait(zio_read_phys(NULL, dev->l2ad_vdev,
 	    VDEV_LABEL_START_SIZE, l2dhdr_asize, abd,
-	    ZIO_CHECKSUM_LABEL, NULL, NULL, ZIO_PRIORITY_ASYNC_READ,
+	    ZIO_CHECKSUM_LABEL, NULL, NULL, ZIO_PRIORITY_SYNC_READ,
 	    ZIO_FLAG_DONT_CACHE | ZIO_FLAG_CANFAIL |
 	    ZIO_FLAG_DONT_PROPAGATE | ZIO_FLAG_DONT_RETRY |
 	    ZIO_FLAG_SPECULATIVE, B_FALSE));
@@ -10156,7 +10175,7 @@ cleanup:
  */
 static void
 l2arc_log_blk_restore(l2arc_dev_t *dev, const l2arc_log_blk_phys_t *lb,
-    uint64_t lb_asize, uint64_t lb_daddr)
+    uint64_t lb_asize)
 {
 	uint64_t	size = 0, asize = 0;
 	uint64_t	log_entries = dev->l2ad_log_entries;
@@ -10734,5 +10753,8 @@ ZFS_MODULE_PARAM(zfs_arc, zfs_arc_, dnode_reduce_percent, ULONG, ZMOD_RW,
 	"Percentage of excess dnodes to try to unpin");
 
 ZFS_MODULE_PARAM(zfs_arc, zfs_arc_, eviction_pct, INT, ZMOD_RW,
-       "When full, ARC allocation waits for eviction of this % of alloc size");
+	"When full, ARC allocation waits for eviction of this % of alloc size");
+
+ZFS_MODULE_PARAM(zfs_arc, zfs_arc_, evict_batch_limit, INT, ZMOD_RW,
+	"The number of headers to evict per sublist before moving to the next");
 /* END CSTYLED */

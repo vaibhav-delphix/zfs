@@ -382,6 +382,20 @@ Default value: \fB16,777,217\fR.
 .sp
 .ne 2
 .na
+\fBzfs_history_output_max\fR (int)
+.ad
+.RS 12n
+When attempting to log the output nvlist of an ioctl in the on-disk history, the
+output will not be stored if it is larger than size (in bytes). This must be
+less then DMU_MAX_ACCESS (64MB). This applies primarily to
+zfs_ioc_channel_program().
+.sp
+Default value: \fB1MB\fR.
+.RE
+
+.sp
+.ne 2
+.na
 \fBzfs_keep_log_spacemaps_at_export\fR (int)
 .ad
 .RS 12n
@@ -861,9 +875,20 @@ Default value: \fB1,048,576\fR.
 \fBzfetch_max_distance\fR (uint)
 .ad
 .RS 12n
-Max bytes to prefetch per stream (default 8MB).
+Max bytes to prefetch per stream.
 .sp
-Default value: \fB8,388,608\fR.
+Default value: \fB8,388,608\fR (8MB).
+.RE
+
+.sp
+.ne 2
+.na
+\fBzfetch_max_idistance\fR (uint)
+.ad
+.RS 12n
+Max bytes to prefetch indirects for per stream.
+.sp
+Default vaule: \fB67,108,864\fR (64MB).
 .RE
 
 .sp
@@ -1621,7 +1646,7 @@ Default value: \fB500,000\fR.
 .RS 12n
 Disables requirement for IVset guids to be present and match when doing a raw
 receive of encrypted datasets. Intended for users whose pools were created with
-ZFS on Linux pre-release versions and now have compatibility issues.
+OpenZFS pre-release versions and now have compatibility issues.
 .sp
 Default value: \fB0\fR.
 .RE
@@ -2052,8 +2077,7 @@ Default value: \fB1\fR.
 .ad
 .RS 12n
 The maximum number of I/Os active to each device.  Ideally, this will be >=
-the sum of each queue's max_active.  It must be at least the sum of each
-queue's min_active.  See the section "ZFS I/O SCHEDULER".
+the sum of each queue's max_active.  See the section "ZFS I/O SCHEDULER".
 .sp
 Default value: \fB1,000\fR.
 .RE
@@ -2200,6 +2224,42 @@ Minimum trim/discard I/Os active to each device.
 See the section "ZFS I/O SCHEDULER".
 .sp
 Default value: \fB1\fR.
+.RE
+
+.sp
+.ne 2
+.na
+\fBzfs_vdev_nia_delay\fR (int)
+.ad
+.RS 12n
+For non-interactive I/O (scrub, resilver, removal, initialize and rebuild),
+the number of concurrently-active I/O's is limited to *_min_active, unless
+the vdev is "idle".  When there are no interactive I/Os active (sync or
+async), and zfs_vdev_nia_delay I/Os have completed since the last
+interactive I/O, then the vdev is considered to be "idle", and the number
+of concurrently-active non-interactive I/O's is increased to *_max_active.
+See the section "ZFS I/O SCHEDULER".
+.sp
+Default value: \fB5\fR.
+.RE
+
+.sp
+.ne 2
+.na
+\fBzfs_vdev_nia_credit\fR (int)
+.ad
+.RS 12n
+Some HDDs tend to prioritize sequential I/O so high, that concurrent
+random I/O latency reaches several seconds.  On some HDDs it happens
+even if sequential I/Os are submitted one at a time, and so setting
+*_max_active to 1 does not help.  To prevent non-interactive I/Os, like
+scrub, from monopolizing the device no more than zfs_vdev_nia_credit
+I/Os can be sent while there are outstanding incomplete interactive
+I/Os.  This enforced wait ensures the HDD services the interactive I/O
+within a reasonable amount of time.
+See the section "ZFS I/O SCHEDULER".
+.sp
+Default value: \fB5\fR.
 .RE
 
 .sp
@@ -2937,6 +2997,31 @@ Maximum read segment size to issue when sequentially resilvering a
 top-level vdev.
 .sp
 Default value: \fB1,048,576\fR.
+.RE
+
+.sp
+.ne 2
+.na
+\fBzfs_rebuild_scrub_enabled\fR (int)
+.ad
+.RS 12n
+Automatically start a pool scrub when the last active sequential resilver
+completes in order to verify the checksums of all blocks which have been
+resilvered. This option is enabled by default and is strongly recommended.
+.sp
+Default value: \fB1\fR.
+.RE
+
+.sp
+.ne 2
+.na
+\fBzfs_rebuild_vdev_limit\fR (ulong)
+.ad
+.RS 12n
+Maximum amount of i/o that can be concurrently issued for a sequential
+resilver per leaf device, given in bytes.
+.sp
+Default value: \fB33,554,432\fR.
 .RE
 
 .sp

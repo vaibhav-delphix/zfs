@@ -1120,7 +1120,21 @@ dump_zap(objset_t *os, uint64_t object, void *data, size_t size)
 		(void) zap_lookup(os, object, attr.za_name,
 		    attr.za_integer_length, attr.za_num_integers, prop);
 		if (attr.za_integer_length == 1) {
-			(void) printf("%s", (char *)prop);
+			if (strcmp(attr.za_name,
+			    DSL_CRYPTO_KEY_MASTER_KEY) == 0 ||
+			    strcmp(attr.za_name,
+			    DSL_CRYPTO_KEY_HMAC_KEY) == 0 ||
+			    strcmp(attr.za_name, DSL_CRYPTO_KEY_IV) == 0 ||
+			    strcmp(attr.za_name, DSL_CRYPTO_KEY_MAC) == 0 ||
+			    strcmp(attr.za_name, DMU_POOL_CHECKSUM_SALT) == 0) {
+				uint8_t *u8 = prop;
+
+				for (i = 0; i < attr.za_num_integers; i++) {
+					(void) printf("%02x", u8[i]);
+				}
+			} else {
+				(void) printf("%s", (char *)prop);
+			}
 		} else {
 			for (i = 0; i < attr.za_num_integers; i++) {
 				switch (attr.za_integer_length) {
@@ -1628,7 +1642,11 @@ dump_metaslab(metaslab_t *msp)
 		    SPACE_MAP_HISTOGRAM_SIZE, sm->sm_shift);
 	}
 
-	ASSERT(msp->ms_size == (1ULL << vd->vdev_ms_shift));
+	if (vd->vdev_ops == &vdev_draid_ops)
+		ASSERT3U(msp->ms_size, <=, 1ULL << vd->vdev_ms_shift);
+	else
+		ASSERT3U(msp->ms_size, ==, 1ULL << vd->vdev_ms_shift);
+
 	dump_spacemap(spa->spa_meta_objset, msp->ms_sm);
 
 	if (spa_feature_is_active(spa, SPA_FEATURE_LOG_SPACEMAP)) {
@@ -5189,8 +5207,6 @@ zdb_blkptr_done(zio_t *zio)
 	zdb_cb_t *zcb = zio->io_private;
 	zbookmark_phys_t *zb = &zio->io_bookmark;
 
-	abd_free(zio->io_abd);
-
 	mutex_enter(&spa->spa_scrub_lock);
 	spa->spa_load_verify_bytes -= BP_GET_PSIZE(bp);
 	cv_broadcast(&spa->spa_scrub_io_cv);
@@ -5217,6 +5233,8 @@ zdb_blkptr_done(zio_t *zio)
 		    blkbuf);
 	}
 	mutex_exit(&spa->spa_scrub_lock);
+
+	abd_free(zio->io_abd);
 }
 
 static int
@@ -6309,7 +6327,7 @@ dump_block_stats(spa_t *spa)
 	(void) printf("\t%-16s %14llu     used: %5.2f%%\n", "Normal class:",
 	    (u_longlong_t)norm_alloc, 100.0 * norm_alloc / norm_space);
 
-	if (spa_special_class(spa)->mc_rotor != NULL) {
+	if (spa_special_class(spa)->mc_allocator[0].mca_rotor != NULL) {
 		uint64_t alloc = metaslab_class_get_alloc(
 		    spa_special_class(spa));
 		uint64_t space = metaslab_class_get_space(
@@ -6320,7 +6338,7 @@ dump_block_stats(spa_t *spa)
 		    100.0 * alloc / space);
 	}
 
-	if (spa_dedup_class(spa)->mc_rotor != NULL) {
+	if (spa_dedup_class(spa)->mc_allocator[0].mca_rotor != NULL) {
 		uint64_t alloc = metaslab_class_get_alloc(
 		    spa_dedup_class(spa));
 		uint64_t space = metaslab_class_get_space(

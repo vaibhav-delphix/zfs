@@ -98,30 +98,19 @@ zvol_is_zvol_impl(const char *device)
 }
 
 static void
-uio_from_bio(uio_t *uio, struct bio *bio)
-{
-	uio->uio_bvec = &bio->bi_io_vec[BIO_BI_IDX(bio)];
-	uio->uio_iovcnt = bio->bi_vcnt - BIO_BI_IDX(bio);
-	uio->uio_loffset = BIO_BI_SECTOR(bio) << 9;
-	uio->uio_segflg = UIO_BVEC;
-	uio->uio_limit = MAXOFFSET_T;
-	uio->uio_resid = BIO_BI_SIZE(bio);
-	uio->uio_skip = BIO_BI_SKIP(bio);
-}
-
-static void
 zvol_write(void *arg)
 {
-	int error = 0;
-
 	zv_request_t *zvr = arg;
 	struct bio *bio = zvr->bio;
-	uio_t uio = { { 0 }, 0 };
-	uio_from_bio(&uio, bio);
+	int error = 0;
+	uio_t uio;
+
+	uio_bvec_init(&uio, bio);
 
 	zvol_state_t *zv = zvr->zv;
-	ASSERT(zv && zv->zv_open_count > 0);
-	ASSERT(zv->zv_zilog != NULL);
+	ASSERT3P(zv, !=, NULL);
+	ASSERT3U(zv->zv_open_count, >, 0);
+	ASSERT3P(zv->zv_zilog, !=, NULL);
 
 	/* bio marked as FLUSH need to flush before write */
 	if (bio_is_flush(bio))
@@ -204,8 +193,9 @@ zvol_discard(void *arg)
 	dmu_tx_t *tx;
 	unsigned long start_jif;
 
-	ASSERT(zv && zv->zv_open_count > 0);
-	ASSERT(zv->zv_zilog != NULL);
+	ASSERT3P(zv, !=, NULL);
+	ASSERT3U(zv->zv_open_count, >, 0);
+	ASSERT3P(zv->zv_zilog, !=, NULL);
 
 	start_jif = jiffies;
 	blk_generic_start_io_acct(zv->zv_zso->zvo_queue, WRITE,
@@ -265,15 +255,16 @@ unlock:
 static void
 zvol_read(void *arg)
 {
-	int error = 0;
-
 	zv_request_t *zvr = arg;
 	struct bio *bio = zvr->bio;
-	uio_t uio = { { 0 }, 0 };
-	uio_from_bio(&uio, bio);
+	int error = 0;
+	uio_t uio;
+
+	uio_bvec_init(&uio, bio);
 
 	zvol_state_t *zv = zvr->zv;
-	ASSERT(zv && zv->zv_open_count > 0);
+	ASSERT3P(zv, !=, NULL);
+	ASSERT3U(zv->zv_open_count, >, 0);
 
 	ssize_t start_resid = uio.uio_resid;
 	unsigned long start_jif = jiffies;
@@ -499,9 +490,9 @@ zvol_open(struct block_device *bdev, fmode_t flag)
 	rw_exit(&zvol_state_lock);
 
 	ASSERT(MUTEX_HELD(&zv->zv_state_lock));
-	ASSERT(zv->zv_open_count != 0 || RW_READ_HELD(&zv->zv_suspend_lock));
 
 	if (zv->zv_open_count == 0) {
+		ASSERT(RW_READ_HELD(&zv->zv_suspend_lock));
 		error = -zvol_first_open(zv, !(flag & FMODE_WRITE));
 		if (error)
 			goto out_mutex;
@@ -518,7 +509,7 @@ zvol_open(struct block_device *bdev, fmode_t flag)
 	if (drop_suspend)
 		rw_exit(&zv->zv_suspend_lock);
 
-	check_disk_change(bdev);
+	zfs_check_media_change(bdev);
 
 	return (0);
 
@@ -547,7 +538,7 @@ zvol_release(struct gendisk *disk, fmode_t mode)
 	zv = disk->private_data;
 
 	mutex_enter(&zv->zv_state_lock);
-	ASSERT(zv->zv_open_count > 0);
+	ASSERT3U(zv->zv_open_count, >, 0);
 	/*
 	 * make sure zvol is not suspended during last close
 	 * (hold zv_suspend_lock) and respect proper lock acquisition
@@ -570,11 +561,12 @@ zvol_release(struct gendisk *disk, fmode_t mode)
 	rw_exit(&zvol_state_lock);
 
 	ASSERT(MUTEX_HELD(&zv->zv_state_lock));
-	ASSERT(zv->zv_open_count != 1 || RW_READ_HELD(&zv->zv_suspend_lock));
 
 	zv->zv_open_count--;
-	if (zv->zv_open_count == 0)
+	if (zv->zv_open_count == 0) {
+		ASSERT(RW_READ_HELD(&zv->zv_suspend_lock));
 		zvol_last_close(zv);
+	}
 
 	mutex_exit(&zv->zv_state_lock);
 
@@ -669,8 +661,13 @@ zvol_revalidate_disk(struct gendisk *disk)
 static int
 zvol_update_volsize(zvol_state_t *zv, uint64_t volsize)
 {
+	struct gendisk *disk = zv->zv_zso->zvo_disk;
 
-	revalidate_disk(zv->zv_zso->zvo_disk);
+#ifdef HAVE_REVALIDATE_DISK_SIZE
+	revalidate_disk_size(disk, zvol_revalidate_disk(disk) == 0);
+#else
+	revalidate_disk(disk);
+#endif
 	return (0);
 }
 
@@ -791,6 +788,7 @@ zvol_alloc(dev_t dev, const char *name)
 	zv = kmem_zalloc(sizeof (zvol_state_t), KM_SLEEP);
 	zso = kmem_zalloc(sizeof (struct zvol_state_os), KM_SLEEP);
 	zv->zv_zso = zso;
+	zv->zv_volmode = volmode;
 
 	list_link_init(&zv->zv_next);
 	mutex_init(&zv->zv_state_lock, NULL, MUTEX_DEFAULT, NULL);
@@ -876,8 +874,8 @@ zvol_free(zvol_state_t *zv)
 
 	ASSERT(!RW_LOCK_HELD(&zv->zv_suspend_lock));
 	ASSERT(!MUTEX_HELD(&zv->zv_state_lock));
-	ASSERT(zv->zv_open_count == 0);
-	ASSERT(zv->zv_zso->zvo_disk->private_data == NULL);
+	ASSERT0(zv->zv_open_count);
+	ASSERT3P(zv->zv_zso->zvo_disk->private_data, ==, NULL);
 
 	rw_destroy(&zv->zv_suspend_lock);
 	zfs_rangelock_fini(&zv->zv_rangelock);
@@ -894,6 +892,11 @@ zvol_free(zvol_state_t *zv)
 
 	kmem_free(zv->zv_zso, sizeof (struct zvol_state_os));
 	kmem_free(zv, sizeof (zvol_state_t));
+}
+
+void
+zvol_wait_close(zvol_state_t *zv)
+{
 }
 
 /*

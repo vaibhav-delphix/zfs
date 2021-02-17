@@ -16,6 +16,7 @@ debian/tmp/etc/default/zfs etc/default/
 debian/tmp/etc/zfs/zfs-functions etc/zfs/
 etc/zfs/zpool.d/
 usr/lib/*/zfs/zpool.d/
+usr/lib/*/zfs/zpool_influxdb
 sbin/fsck.zfs
 sbin/mount.zfs
 sbin/ztest
@@ -110,6 +111,7 @@ usr/share/man/man8/zpool-sync.8
 usr/share/man/man8/zpool-trim.8
 usr/share/man/man8/zpool-upgrade.8
 usr/share/man/man8/zpool-wait.8
+usr/share/man/man8/zpool_influxdb.8
 usr/share/man/man8/zpoolconcepts.8
 usr/share/man/man8/zpoolprops.8
 usr/share/man/man8/vdev_id.8

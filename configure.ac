@@ -87,6 +87,7 @@ AC_CONFIG_FILES([
 	cmd/ztest/Makefile
 	cmd/zvol_id/Makefile
 	cmd/zvol_wait/Makefile
+	cmd/zpool_influxdb/Makefile
 	contrib/Makefile
 	contrib/bash_completion.d/Makefile
 	contrib/bpftrace/Makefile
@@ -203,9 +204,11 @@ AC_CONFIG_FILES([
 	tests/zfs-tests/Makefile
 	tests/zfs-tests/callbacks/Makefile
 	tests/zfs-tests/cmd/Makefile
+	tests/zfs-tests/cmd/badsend/Makefile
 	tests/zfs-tests/cmd/btree_test/Makefile
 	tests/zfs-tests/cmd/chg_usr_exec/Makefile
 	tests/zfs-tests/cmd/devname2devid/Makefile
+	tests/zfs-tests/cmd/draid/Makefile
 	tests/zfs-tests/cmd/dir_rd_update/Makefile
 	tests/zfs-tests/cmd/file_check/Makefile
 	tests/zfs-tests/cmd/file_trunc/Makefile
@@ -237,6 +240,7 @@ AC_CONFIG_FILES([
 	tests/zfs-tests/tests/functional/Makefile
 	tests/zfs-tests/tests/functional/acl/Makefile
 	tests/zfs-tests/tests/functional/acl/posix/Makefile
+	tests/zfs-tests/tests/functional/acl/posix-sa/Makefile
 	tests/zfs-tests/tests/functional/alloc_class/Makefile
 	tests/zfs-tests/tests/functional/arc/Makefile
 	tests/zfs-tests/tests/functional/atime/Makefile
@@ -393,6 +397,7 @@ AC_CONFIG_FILES([
 	tests/zfs-tests/tests/functional/vdev_zaps/Makefile
 	tests/zfs-tests/tests/functional/write_dirs/Makefile
 	tests/zfs-tests/tests/functional/xattr/Makefile
+	tests/zfs-tests/tests/functional/zpool_influxdb/Makefile
 	tests/zfs-tests/tests/functional/zvol/Makefile
 	tests/zfs-tests/tests/functional/zvol/zvol_ENOSPC/Makefile
 	tests/zfs-tests/tests/functional/zvol/zvol_cli/Makefile
