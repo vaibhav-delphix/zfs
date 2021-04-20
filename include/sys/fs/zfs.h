@@ -247,6 +247,8 @@ typedef enum {
 	ZPOOL_PROP_LOAD_GUID,
 	ZPOOL_PROP_AUTOTRIM,
 	ZPOOL_PROP_COMPATIBILITY,
+	ZPOOL_PROP_OBJ_ENDPOINT,
+	ZPOOL_PROP_OBJ_CREDENTIALS,
 	ZPOOL_NUM_PROPS
 } zpool_prop_t;
 
@@ -779,6 +781,7 @@ typedef struct zpool_load_policy {
 #define	VDEV_TYPE_LOG			"log"
 #define	VDEV_TYPE_L2CACHE		"l2cache"
 #define	VDEV_TYPE_INDIRECT		"indirect"
+#define	VDEV_TYPE_OBJSTORE		"object_store"
 
 #define	VDEV_RAIDZ_MAXPARITY		3
 
