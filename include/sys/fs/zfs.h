@@ -453,6 +453,7 @@ typedef enum zfs_key_location {
 	ZFS_KEYLOCATION_NONE = 0,
 	ZFS_KEYLOCATION_PROMPT,
 	ZFS_KEYLOCATION_URI,
+	ZFS_KEYLOCATION_ENVIRONMENT,
 	ZFS_KEYLOCATION_LOCATIONS
 } zfs_keylocation_t;
 
@@ -631,6 +632,8 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_CHECKPOINT_STATS	"checkpoint_stats" /* not on disk */
 #define	ZPOOL_CONFIG_VDEV_STATS		"vdev_stats"	/* not stored on disk */
 #define	ZPOOL_CONFIG_INDIRECT_SIZE	"indirect_size"	/* not stored on disk */
+/* not stored on disk */
+#define	ZPOOL_CONFIG_OBJSTORE_CREDENTIALS "objstore_credentials"
 
 /* container nvlist of extended stats */
 #define	ZPOOL_CONFIG_VDEV_STATS_EX	"vdev_stats_ex"
