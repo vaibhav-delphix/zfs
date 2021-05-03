@@ -3183,7 +3183,6 @@ import_pools(nvlist_t *pools, nvlist_t *props, char *mntopts, int flags,
 	nvpair_t *elem = NULL;
 	boolean_t first = B_TRUE;
 	while ((elem = nvlist_next_nvpair(pools, elem)) != NULL) {
-
 		verify(nvpair_value_nvlist(elem, &config) == 0);
 
 		verify(nvlist_lookup_uint64(config, ZPOOL_CONFIG_POOL_STATE,
@@ -3730,6 +3729,7 @@ zpool_do_import(int argc, char **argv)
 	idata.cachefile = cachefile;
 	idata.scan = do_scan;
 	idata.policy = policy;
+	idata.handle_creds = (int (*)(void *, nvlist_t *, char *))zpool_get_objstore_credentials;
 
 	pools = zpool_search_import(g_zfs, &idata, &libzfs_config_ops);
 
