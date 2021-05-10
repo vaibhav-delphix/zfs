@@ -22,14 +22,14 @@ lazy_static! {
         reading: HashMap::new(),
     });
     static ref PREFIX: String = match env::var("AWS_PREFIX") {
-        Ok(val) => format!("{}/{}", val, key),
-        Err(_) => key.to_string(),
+        Ok(val) => val,
+        Err(_) => "".to_string(),
     };
 }
 
 /// For testing, prefix all object keys with this string.
 pub fn prefixed(key: &str) -> String {
-    format!("{}/{}", prefix, key)
+    format!("{}/{}", *PREFIX, key)
 }
 
 async fn retry<Fut>(msg: &str, f: impl Fn() -> Fut) -> Vec<u8>
