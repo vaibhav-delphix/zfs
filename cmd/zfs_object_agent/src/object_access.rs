@@ -6,7 +6,6 @@ use lru::LruCache;
 use s3::bucket::Bucket;
 use std::collections::HashMap;
 use std::env;
-use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
@@ -23,23 +22,14 @@ lazy_static! {
         reading: HashMap::new(),
     });
     static ref PREFIX: String = match env::var("AWS_PREFIX") {
-        Ok(val) => val,
-        Err(_) => {
-            let raw_id = match fs::read_to_string("/etc/machine-id") {
-                Ok(machineid) => machineid,
-                Err(_) => env::var("USER").expect(
-                    "environment variable AWS_PREFIX or USER must be set \
-                    or file /etc/machine-id should be present",
-                ),
-            };
-            raw_id[..std::cmp::min(10, raw_id.len())].to_string()
-        }
+        Ok(val) => format!("{}/{}", val, key),
+        Err(_) => key.to_string(),
     };
 }
 
 /// For testing, prefix all object keys with this string.
 pub fn prefixed(key: &str) -> String {
-    format!("{}/{}", *PREFIX, key)
+    format!("{}/{}", prefix, key)
 }
 
 async fn retry<Fut>(msg: &str, f: impl Fn() -> Fut) -> Vec<u8>
@@ -139,6 +129,15 @@ pub async fn get_object(bucket: &Bucket, key: &str) -> Arc<Vec<u8>> {
     }
 }
 
+pub async fn list_objects(
+    bucket: &Bucket,
+    prefix: &str,
+    delimiter: Option<String>,
+) -> Vec<s3::serde_types::ListBucketResult> {
+    let full_prefix = prefixed(prefix);
+    bucket.list(full_prefix, delimiter).await.unwrap()
+}
+
 // XXX update to take the actual Vec so that we can cache it?  Although that
 // should be the uncommon case.
 pub async fn put_object(bucket: &Bucket, key: &str, data: &[u8]) {
@@ -172,11 +171,17 @@ pub async fn object_exists(bucket: &Bucket, key: &str) -> bool {
     let prefixed_key = prefixed(key);
     println!("looking for {}", prefixed_key);
     let begin = Instant::now();
-    let results = bucket.list(prefixed_key, None).await.unwrap();
-    assert!(results.len() == 1);
-    let list = &results[0];
-    println!("list completed in {}ms", begin.elapsed().as_millis());
-    // Note need to check if this exact name is in the results. If we are looking
-    // for "x/y" and there is "x/y" and "x/yz", both will be returned.
-    list.contents.iter().find(|o| o.key == key).is_some()
+    match bucket.list(prefixed_key, None).await {
+        Ok(results) => {
+            assert!(results.len() == 1);
+            let list = &results[0];
+            println!("list completed in {}ms", begin.elapsed().as_millis());
+            // Note need to check if this exact name is in the results. If we are looking
+            // for "x/y" and there is "x/y" and "x/yz", both will be returned.
+            list.contents.iter().find(|o| o.key == key).is_some()
+        }
+        Err(_) => {
+            return false;
+        }
+    }
 }
