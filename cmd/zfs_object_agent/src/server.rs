@@ -50,7 +50,7 @@ impl Server {
         tokio::spawn(async move {
             loop {
                 let nvl = match tokio::time::timeout(
-                    Duration::from_millis(1000),
+                    Duration::from_millis(100),
                     Self::get_next_request(&mut server.input),
                 )
                 .await
@@ -288,8 +288,8 @@ impl Server {
             let mut nvl = NvList::new_unique_names();
             nvl.insert("Type", "read done").unwrap();
             nvl.insert("block", &block.0).unwrap();
-            nvl.insert("data", data.as_slice()).unwrap();
             nvl.insert("request_id", &request_id).unwrap();
+            nvl.insert("data", data.as_slice()).unwrap();
             println!(
                 "sending read done response: block={} req={} data=[{} bytes]",
                 block,

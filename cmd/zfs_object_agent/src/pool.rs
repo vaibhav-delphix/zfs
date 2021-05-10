@@ -249,6 +249,8 @@ struct PoolSyncingState {
     reclaim_cb: Option<oneshot::Receiver<SyncTask>>,
     // Protects objects that are being overwritten for sync-to-convergence
     rewriting_objects: HashMap<ObjectID, Arc<tokio::sync::Mutex<()>>>,
+    // objects to delete at the end of this txg
+    objects_to_delete: Vec<ObjectID>,
 }
 
 type SyncTask =
@@ -332,6 +334,7 @@ impl Pool {
                     stats: phys.stats,
                     reclaim_cb: None,
                     rewriting_objects: HashMap::new(),
+                    objects_to_delete: Vec::new(),
                 }),
                 block_to_obj: std::sync::RwLock::new(ObjectBlockMap::new()),
             }),
@@ -446,6 +449,7 @@ impl Pool {
                         stats: PoolStatsPhys::default(),
                         reclaim_cb: None,
                         rewriting_objects: HashMap::new(),
+                        objects_to_delete: Vec::new(),
                     }),
                     block_to_obj: std::sync::RwLock::new(ObjectBlockMap::new()),
                 }),
@@ -498,6 +502,10 @@ impl Pool {
             Self::wait_for_pending_flushes(&mut syncing_state).await;
             syncing_state.rewriting_objects.clear();
 
+            // Should only be adding to this during end_txg.
+            // XXX change to an Option?
+            assert!(syncing_state.objects_to_delete.is_empty());
+
             if let Some(rt) = syncing_state.reclaim_cb.as_mut() {
                 if let Ok(cb) = rt.try_recv() {
                     cb(&mut syncing_state).await;
@@ -529,6 +537,17 @@ impl Pool {
                 last_txg: txg,
             };
             s.put(&state.readonly_state.bucket).await;
+
+            // Now that the metadata state has been atomically moved forward, we
+            // can delete objects that are no longer needed
+            for obj in syncing_state.objects_to_delete.drain(..) {
+                let state = state.clone();
+                // Note: we don't care about waiting for the frees to complete.
+                tokio::spawn(async move {
+                    let key = DataObjectPhys::key(state.readonly_state.guid, obj);
+                    object_access::delete_object(&state.readonly_state.bucket, &key).await;
+                });
+            }
 
             // update txg
             syncing_state.last_txg = txg;
@@ -734,7 +753,7 @@ impl Pool {
                 // this blockID must have been written
                 assert!(removed.is_some());
 
-                // Size may not change.  This way we don't have to change the
+                // Size must not change.  This way we don't have to change the
                 // accounting, which would require writing a new entry to the
                 // ObjectSizeLog, which is not allowed in this (async) context.
                 // XXX this may be problematic if we switch to ashift=0
@@ -856,6 +875,9 @@ fn log_deleted_objects(
             .object_size_log
             .append(txg, ObjectSizeLogEntry::Freed { obj });
         syncing_state.stats.objects_count -= 1;
+        // XXX maybe use mem::replace to move our whole vector, since there
+        // aren't any other users of objects_to_delete?
+        syncing_state.objects_to_delete.push(obj);
     }
 }
 
@@ -998,16 +1020,33 @@ async fn reclaim_frees_object(
             assert_eq!(a.guid, b.guid);
             a.object = min(a.object, b.object);
             a.txg = min(a.txg, b.txg); // XXX maybe should track min & max txg?
-            a.blocks_size += b.blocks_size;
             println!(
                 "moving {} blocks from {:?} to {:?}",
                 b.blocks.len(),
                 b.object,
                 a.object
             );
+            let mut already_moved = 0;
             for (k, v) in b.blocks.drain() {
-                let old = a.blocks.insert(k, v);
-                assert!(old.is_none());
+                let k2 = k.clone();
+                let len = v.len() as u32;
+                match a.blocks.insert(k, v) {
+                    Some(old_vec) => {
+                        // May have already been transferred in a previous job
+                        // during which we crashed before updating the metadata.
+                        assert_eq!(&old_vec, a.blocks.get(&k2).unwrap());
+                        already_moved += 1;
+                    }
+                    None => {
+                        a.blocks_size += len;
+                    }
+                }
+            }
+            if already_moved > 0 {
+                println!(
+                    "while moving blocks from {:?} to {:?} found {} blocks already moved",
+                    b.object, a.object, already_moved
+                );
             }
             a
         })

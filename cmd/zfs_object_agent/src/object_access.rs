@@ -22,12 +22,7 @@ lazy_static! {
         cache: LruCache::new(100),
         reading: HashMap::new(),
     });
-}
-
-/// For testing, prefix all object keys with this string.
-/// Should be something like "username-vmname"
-pub fn prefixed(key: &str) -> String {
-    let prefix = match env::var("AWS_PREFIX") {
+    static ref PREFIX: String = match env::var("AWS_PREFIX") {
         Ok(val) => val,
         Err(_) => {
             let raw_id = match fs::read_to_string("/etc/machine-id") {
@@ -40,7 +35,11 @@ pub fn prefixed(key: &str) -> String {
             raw_id[..std::cmp::min(10, raw_id.len())].to_string()
         }
     };
-    format!("{}/{}", prefix, key)
+}
+
+/// For testing, prefix all object keys with this string.
+pub fn prefixed(key: &str) -> String {
+    format!("{}/{}", *PREFIX, key)
 }
 
 async fn retry<Fut>(msg: &str, f: impl Fn() -> Fut) -> Vec<u8>
@@ -56,7 +55,7 @@ where
                 println!("{} returned: {}; retrying in {:?}", msg, e, delay);
             }
             Ok((mydata, code)) => {
-                if code == 200 {
+                if code >= 200 && code < 300 {
                     break mydata;
                 } else if code >= 500 && code < 600 {
                     println!(
@@ -77,7 +76,7 @@ where
         delay *= 2;
     };
     println!(
-        "{}: {} bytes in {}ms",
+        "{}: returned {} bytes in {}ms",
         msg,
         data.len(),
         begin.elapsed().as_millis()
@@ -154,9 +153,10 @@ pub async fn put_object(bucket: &Bucket, key: &str, data: &[u8]) {
     }
 
     let prefixed_key = &prefixed(key);
-    retry(&format!("put {}", prefixed_key), || async {
-        bucket.put_object(prefixed_key, data).await
-    })
+    retry(
+        &format!("put {} ({} bytes)", prefixed_key, data.len()),
+        || async { bucket.put_object(prefixed_key, data).await },
+    )
     .await;
 }
 
