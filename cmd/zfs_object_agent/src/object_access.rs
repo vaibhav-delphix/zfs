@@ -3,6 +3,7 @@ use async_stream::stream;
 use bytes::Bytes;
 use core::time::Duration;
 use futures::{Future, StreamExt};
+use http::StatusCode;
 use lazy_static::lazy_static;
 use log::*;
 use lru::LruCache;
@@ -263,6 +264,28 @@ impl ObjectAccess {
         results
     }
 
+    pub async fn object_exists(&self, key: &str) -> bool {
+        let res = retry(&format!("head {}", prefixed(key)), || async {
+            let req = HeadObjectRequest {
+                bucket: self.bucket_str.clone(),
+                key: prefixed(key),
+                ..Default::default()
+            };
+            let res = self.client.head_object(req).await;
+            match res {
+                Err(RusotoError::Service(HeadObjectError::NoSuchKey(_))) => (false, res),
+                Err(RusotoError::Unknown(rusoto_core::request::BufferedHttpResponse {
+                    status: StatusCode::NOT_FOUND,
+                    body: _,
+                    headers: _,
+                })) => (false, res),
+                _ => (true, res),
+            }
+        })
+        .await;
+        res.err() == None
+    }
+
     async fn put_object_impl(&self, key: &str, data: Vec<u8>) {
         let len = data.len();
         let a = Arc::new(Bytes::from(data));
@@ -352,23 +375,5 @@ impl ObjectAccess {
     // XXX should we split them up here?
     pub async fn delete_objects(&self, keys: Vec<String>) {
         while self.delete_objects_impl(&keys).await {}
-    }
-
-    pub async fn object_exists(&self, key: &str) -> bool {
-        let prefixed_key = prefixed(key);
-        debug!("looking for {}", prefixed_key);
-        let results = self.list_objects(key, None, None).await;
-
-        assert_eq!(results.len(), 1);
-        let list = &results[0];
-        // Note need to check if this exact name is in the results. If we are looking
-        // for "x/y" and there is "x/y" and "x/yz", both will be returned.
-        list.contents.as_ref().unwrap_or(&vec![]).iter().any(|o| {
-            if let Some(k) = &o.key {
-                k == key
-            } else {
-                false
-            }
-        })
     }
 }
