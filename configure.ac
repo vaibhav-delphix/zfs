@@ -36,7 +36,7 @@ AC_LANG(C)
 ZFS_AC_META
 AC_CONFIG_AUX_DIR([config])
 AC_CONFIG_MACRO_DIR([config])
-AC_CANONICAL_SYSTEM
+AC_CANONICAL_TARGET
 AM_MAINTAINER_MODE
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 AM_INIT_AUTOMAKE([subdir-objects])
@@ -45,9 +45,9 @@ AC_CONFIG_HEADERS([zfs_config.h], [
 	awk -f ${ac_srcdir}/config/config.awk zfs_config.h.tmp >zfs_config.h &&
 	rm zfs_config.h.tmp) || exit 1])
 
+LT_INIT
 AC_PROG_INSTALL
 AC_PROG_CC
-AC_PROG_LIBTOOL
 PKG_PROG_PKG_CONFIG
 AM_PROG_AS
 AM_PROG_CC_C_O
@@ -61,6 +61,7 @@ ZFS_AC_DEBUG
 ZFS_AC_DEBUGINFO
 ZFS_AC_DEBUG_KMEM
 ZFS_AC_DEBUG_KMEM_TRACKING
+ZFS_AC_DEBUG_INVARIANTS
 
 AC_CONFIG_FILES([
 	Makefile
@@ -233,6 +234,7 @@ AC_CONFIG_FILES([
 	tests/zfs-tests/cmd/readmmap/Makefile
 	tests/zfs-tests/cmd/rename_dir/Makefile
 	tests/zfs-tests/cmd/rm_lnkcnt_zero_file/Makefile
+	tests/zfs-tests/cmd/send_doall/Makefile
 	tests/zfs-tests/cmd/stride_dd/Makefile
 	tests/zfs-tests/cmd/threadsappend/Makefile
 	tests/zfs-tests/cmd/user_ns_exec/Makefile
@@ -241,6 +243,7 @@ AC_CONFIG_FILES([
 	tests/zfs-tests/tests/Makefile
 	tests/zfs-tests/tests/functional/Makefile
 	tests/zfs-tests/tests/functional/acl/Makefile
+	tests/zfs-tests/tests/functional/acl/off/Makefile
 	tests/zfs-tests/tests/functional/acl/posix/Makefile
 	tests/zfs-tests/tests/functional/acl/posix-sa/Makefile
 	tests/zfs-tests/tests/functional/alloc_class/Makefile

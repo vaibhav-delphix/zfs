@@ -518,7 +518,7 @@ update_pages(znode_t *zp, int64_t start, int len, objset_t *os)
  * in one single dmu_read() call.
  */
 int
-mappedread_sf(znode_t *zp, int nbytes, uio_t *uio)
+mappedread_sf(znode_t *zp, int nbytes, zfs_uio_t *uio)
 {
 	vnode_t *vp = ZTOV(zp);
 	objset_t *os = zp->z_zfsvfs->z_os;
@@ -530,14 +530,14 @@ mappedread_sf(znode_t *zp, int nbytes, uio_t *uio)
 	int len = nbytes;
 	int error = 0;
 
-	ASSERT(uio->uio_segflg == UIO_NOCOPY);
+	ASSERT(zfs_uio_segflg(uio) == UIO_NOCOPY);
 	ASSERT(vp->v_mount != NULL);
 	obj = vp->v_object;
 	ASSERT(obj != NULL);
-	ASSERT((uio->uio_loffset & PAGEOFFSET) == 0);
+	ASSERT((zfs_uio_offset(uio) & PAGEOFFSET) == 0);
 
 	zfs_vmobject_wlock_12(obj);
-	for (start = uio->uio_loffset; len > 0; start += PAGESIZE) {
+	for (start = zfs_uio_offset(uio); len > 0; start += PAGESIZE) {
 		int bytes = MIN(PAGESIZE, len);
 
 		pp = vm_page_grab_unlocked(obj, OFF_TO_IDX(start),
@@ -584,8 +584,7 @@ mappedread_sf(znode_t *zp, int nbytes, uio_t *uio)
 		}
 		if (error)
 			break;
-		uio->uio_resid -= bytes;
-		uio->uio_offset += bytes;
+		zfs_uio_advance(uio, bytes);
 		len -= bytes;
 	}
 	zfs_vmobject_wunlock_12(obj);
@@ -603,7 +602,7 @@ mappedread_sf(znode_t *zp, int nbytes, uio_t *uio)
  *	 the file is memory mapped.
  */
 int
-mappedread(znode_t *zp, int nbytes, uio_t *uio)
+mappedread(znode_t *zp, int nbytes, zfs_uio_t *uio)
 {
 	vnode_t *vp = ZTOV(zp);
 	vm_object_t obj;
@@ -616,7 +615,7 @@ mappedread(znode_t *zp, int nbytes, uio_t *uio)
 	obj = vp->v_object;
 	ASSERT(obj != NULL);
 
-	start = uio->uio_loffset;
+	start = zfs_uio_offset(uio);
 	off = start & PAGEOFFSET;
 	zfs_vmobject_wlock_12(obj);
 	for (start &= PAGEMASK; len > 0; start += PAGESIZE) {
@@ -629,7 +628,8 @@ mappedread(znode_t *zp, int nbytes, uio_t *uio)
 
 			zfs_vmobject_wunlock_12(obj);
 			va = zfs_map_page(pp, &sf);
-			error = vn_io_fault_uiomove(va + off, bytes, uio);
+			error = vn_io_fault_uiomove(va + off, bytes,
+			    GET_UIO_STRUCT(uio));
 			zfs_unmap_page(sf);
 			zfs_vmobject_wlock_12(obj);
 			page_unhold(pp);
@@ -701,10 +701,6 @@ zfs_lookup_lock(vnode_t *dvp, vnode_t *vp, const char *name, int lkflags)
 
 	if (zfsvfs->z_replay == B_FALSE)
 		ASSERT_VOP_LOCKED(dvp, __func__);
-#ifdef DIAGNOSTIC
-	if ((zdp->z_pflags & ZFS_XATTR) == 0)
-		VERIFY(!RRM_LOCK_HELD(&zfsvfs->z_teardown_lock));
-#endif
 
 	if (name[0] == 0 || (name[0] == '.' && name[1] == 0)) {
 		ASSERT3P(dvp, ==, vp);
@@ -1653,7 +1649,7 @@ zfs_rmdir(znode_t *dzp, const char *name, znode_t *cwd, cred_t *cr, int flags)
  */
 /* ARGSUSED */
 static int
-zfs_readdir(vnode_t *vp, uio_t *uio, cred_t *cr, int *eofp,
+zfs_readdir(vnode_t *vp, zfs_uio_t *uio, cred_t *cr, int *eofp,
     int *ncookies, ulong_t **cookies)
 {
 	znode_t		*zp = VTOZ(vp);
@@ -1698,7 +1694,7 @@ zfs_readdir(vnode_t *vp, uio_t *uio, cred_t *cr, int *eofp,
 	/*
 	 * Check for valid iov_len.
 	 */
-	if (uio->uio_iov->iov_len <= 0) {
+	if (GET_UIO_STRUCT(uio)->uio_iov->iov_len <= 0) {
 		ZFS_EXIT(zfsvfs);
 		return (SET_ERROR(EINVAL));
 	}
@@ -1713,7 +1709,7 @@ zfs_readdir(vnode_t *vp, uio_t *uio, cred_t *cr, int *eofp,
 
 	error = 0;
 	os = zfsvfs->z_os;
-	offset = uio->uio_loffset;
+	offset = zfs_uio_offset(uio);
 	prefetch = zp->z_zn_prefetch;
 
 	/*
@@ -1734,9 +1730,9 @@ zfs_readdir(vnode_t *vp, uio_t *uio, cred_t *cr, int *eofp,
 	/*
 	 * Get space to change directory entries into fs independent format.
 	 */
-	iovp = uio->uio_iov;
+	iovp = GET_UIO_STRUCT(uio)->uio_iov;
 	bytes_wanted = iovp->iov_len;
-	if (uio->uio_segflg != UIO_SYSSPACE || uio->uio_iovcnt != 1) {
+	if (zfs_uio_segflg(uio) != UIO_SYSSPACE || zfs_uio_iovcnt(uio) != 1) {
 		bufsize = bytes_wanted;
 		outbuf = kmem_alloc(bufsize, KM_SLEEP);
 		odp = (struct dirent64 *)outbuf;
@@ -1751,7 +1747,7 @@ zfs_readdir(vnode_t *vp, uio_t *uio, cred_t *cr, int *eofp,
 		/*
 		 * Minimum entry size is dirent size and 1 byte for a file name.
 		 */
-		ncooks = uio->uio_resid / (sizeof (struct dirent) -
+		ncooks = zfs_uio_resid(uio) / (sizeof (struct dirent) -
 		    sizeof (((struct dirent *)NULL)->d_name) + 1);
 		cooks = malloc(ncooks * sizeof (ulong_t), M_TEMP, M_WAITOK);
 		*cookies = cooks;
@@ -1931,20 +1927,21 @@ zfs_readdir(vnode_t *vp, uio_t *uio, cred_t *cr, int *eofp,
 	if (ncookies != NULL)
 		*ncookies -= ncooks;
 
-	if (uio->uio_segflg == UIO_SYSSPACE && uio->uio_iovcnt == 1) {
+	if (zfs_uio_segflg(uio) == UIO_SYSSPACE && zfs_uio_iovcnt(uio) == 1) {
 		iovp->iov_base += outcount;
 		iovp->iov_len -= outcount;
-		uio->uio_resid -= outcount;
-	} else if ((error = uiomove(outbuf, (long)outcount, UIO_READ, uio))) {
+		zfs_uio_resid(uio) -= outcount;
+	} else if ((error =
+	    zfs_uiomove(outbuf, (long)outcount, UIO_READ, uio))) {
 		/*
 		 * Reset the pointer.
 		 */
-		offset = uio->uio_loffset;
+		offset = zfs_uio_offset(uio);
 	}
 
 update:
 	zap_cursor_fini(&zc);
-	if (uio->uio_segflg != UIO_SYSSPACE || uio->uio_iovcnt != 1)
+	if (zfs_uio_segflg(uio) != UIO_SYSSPACE || zfs_uio_iovcnt(uio) != 1)
 		kmem_free(outbuf, bufsize);
 
 	if (error == ENOENT)
@@ -1952,7 +1949,7 @@ update:
 
 	ZFS_ACCESSTIME_STAMP(zfsvfs, zp);
 
-	uio->uio_loffset = offset;
+	zfs_uio_setoffset(uio, offset);
 	ZFS_EXIT(zfsvfs);
 	if (error != 0 && cookies != NULL) {
 		free(*cookies, M_TEMP);
@@ -3635,7 +3632,7 @@ zfs_symlink(znode_t *dzp, const char *name, vattr_t *vap,
  */
 /* ARGSUSED */
 static int
-zfs_readlink(vnode_t *vp, uio_t *uio, cred_t *cr, caller_context_t *ct)
+zfs_readlink(vnode_t *vp, zfs_uio_t *uio, cred_t *cr, caller_context_t *ct)
 {
 	znode_t		*zp = VTOZ(vp);
 	zfsvfs_t	*zfsvfs = zp->z_zfsvfs;
@@ -3878,13 +3875,13 @@ zfs_inactive(vnode_t *vp, cred_t *cr, caller_context_t *ct)
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
 	int error;
 
-	ZFS_RLOCK_TEARDOWN_INACTIVE(zfsvfs);
+	ZFS_TEARDOWN_INACTIVE_ENTER_READ(zfsvfs);
 	if (zp->z_sa_hdl == NULL) {
 		/*
 		 * The fs has been unmounted, or we did a
 		 * suspend/resume and this file no longer exists.
 		 */
-		ZFS_RUNLOCK_TEARDOWN_INACTIVE(zfsvfs);
+		ZFS_TEARDOWN_INACTIVE_EXIT_READ(zfsvfs);
 		vrecycle(vp);
 		return;
 	}
@@ -3893,7 +3890,7 @@ zfs_inactive(vnode_t *vp, cred_t *cr, caller_context_t *ct)
 		/*
 		 * Fast path to recycle a vnode of a removed file.
 		 */
-		ZFS_RUNLOCK_TEARDOWN_INACTIVE(zfsvfs);
+		ZFS_TEARDOWN_INACTIVE_EXIT_READ(zfsvfs);
 		vrecycle(vp);
 		return;
 	}
@@ -3913,7 +3910,7 @@ zfs_inactive(vnode_t *vp, cred_t *cr, caller_context_t *ct)
 			dmu_tx_commit(tx);
 		}
 	}
-	ZFS_RUNLOCK_TEARDOWN_INACTIVE(zfsvfs);
+	ZFS_TEARDOWN_INACTIVE_EXIT_READ(zfsvfs);
 }
 
 
@@ -4418,8 +4415,9 @@ struct vop_read_args {
 static int
 zfs_freebsd_read(struct vop_read_args *ap)
 {
-
-	return (zfs_read(VTOZ(ap->a_vp), ap->a_uio, ioflags(ap->a_ioflag),
+	zfs_uio_t uio;
+	zfs_uio_init(&uio, ap->a_uio);
+	return (zfs_read(VTOZ(ap->a_vp), &uio, ioflags(ap->a_ioflag),
 	    ap->a_cred));
 }
 
@@ -4435,8 +4433,9 @@ struct vop_write_args {
 static int
 zfs_freebsd_write(struct vop_write_args *ap)
 {
-
-	return (zfs_write(VTOZ(ap->a_vp), ap->a_uio, ioflags(ap->a_ioflag),
+	zfs_uio_t uio;
+	zfs_uio_init(&uio, ap->a_uio);
+	return (zfs_write(VTOZ(ap->a_vp), &uio, ioflags(ap->a_ioflag),
 	    ap->a_cred));
 }
 
@@ -4688,8 +4687,9 @@ struct vop_readdir_args {
 static int
 zfs_freebsd_readdir(struct vop_readdir_args *ap)
 {
-
-	return (zfs_readdir(ap->a_vp, ap->a_uio, ap->a_cred, ap->a_eofflag,
+	zfs_uio_t uio;
+	zfs_uio_init(&uio, ap->a_uio);
+	return (zfs_readdir(ap->a_vp, &uio, ap->a_cred, ap->a_eofflag,
 	    ap->a_ncookies, ap->a_cookies));
 }
 
@@ -4979,8 +4979,9 @@ struct vop_readlink_args {
 static int
 zfs_freebsd_readlink(struct vop_readlink_args *ap)
 {
-
-	return (zfs_readlink(ap->a_vp, ap->a_uio, ap->a_cred, NULL));
+	zfs_uio_t uio;
+	zfs_uio_init(&uio, ap->a_uio);
+	return (zfs_readlink(ap->a_vp, &uio, ap->a_cred, NULL));
 }
 
 #ifndef _SYS_SYSPROTO_H_
@@ -5046,10 +5047,10 @@ zfs_freebsd_need_inactive(struct vop_need_inactive_args *ap)
 	if (vn_need_pageq_flush(vp))
 		return (1);
 
-	if (!ZFS_TRYRLOCK_TEARDOWN_INACTIVE(zfsvfs))
+	if (!ZFS_TEARDOWN_INACTIVE_TRY_ENTER_READ(zfsvfs))
 		return (1);
 	need = (zp->z_sa_hdl == NULL || zp->z_unlinked || zp->z_atime_dirty);
-	ZFS_RUNLOCK_TEARDOWN_INACTIVE(zfsvfs);
+	ZFS_TEARDOWN_INACTIVE_EXIT_READ(zfsvfs);
 
 	return (need);
 }
@@ -5080,12 +5081,12 @@ zfs_freebsd_reclaim(struct vop_reclaim_args *ap)
 	 * zfs_znode_dmu_fini in zfsvfs_teardown during
 	 * force unmount.
 	 */
-	ZFS_RLOCK_TEARDOWN_INACTIVE(zfsvfs);
+	ZFS_TEARDOWN_INACTIVE_ENTER_READ(zfsvfs);
 	if (zp->z_sa_hdl == NULL)
 		zfs_znode_free(zp);
 	else
 		zfs_zinactive(zp);
-	ZFS_RUNLOCK_TEARDOWN_INACTIVE(zfsvfs);
+	ZFS_TEARDOWN_INACTIVE_EXIT_READ(zfsvfs);
 
 	vp->v_data = NULL;
 	return (0);
@@ -5448,11 +5449,14 @@ zfs_listextattr(struct vop_listextattr_args *ap)
 	uint8_t dirbuf[sizeof (struct dirent)];
 	struct dirent *dp;
 	struct iovec aiov;
-	struct uio auio, *uio = ap->a_uio;
+	struct uio auio;
 	size_t *sizep = ap->a_size;
 	size_t plen;
 	vnode_t *xvp = NULL, *vp;
 	int done, error, eof, pos;
+	zfs_uio_t uio;
+
+	zfs_uio_init(&uio, ap->a_uio);
 
 	/*
 	 * If the xattr property is off, refuse the request.
@@ -5534,15 +5538,16 @@ zfs_listextattr(struct vop_listextattr_args *ap)
 			nlen = dp->d_namlen - plen;
 			if (sizep != NULL)
 				*sizep += 1 + nlen;
-			else if (uio != NULL) {
+			else if (GET_UIO_STRUCT(&uio) != NULL) {
 				/*
 				 * Format of extattr name entry is one byte for
 				 * length and the rest for name.
 				 */
-				error = uiomove(&nlen, 1, uio->uio_rw, uio);
+				error = zfs_uiomove(&nlen, 1, zfs_uio_rw(&uio),
+				    &uio);
 				if (error == 0) {
-					error = uiomove(dp->d_name + plen, nlen,
-					    uio->uio_rw, uio);
+					error = zfs_uiomove(dp->d_name + plen,
+					    nlen, zfs_uio_rw(&uio), &uio);
 				}
 				if (error != 0)
 					break;
@@ -5725,39 +5730,6 @@ zfs_vptocnp(struct vop_vptocnp_args *ap)
 	return (error);
 }
 
-#ifdef DIAGNOSTIC
-#ifndef _SYS_SYSPROTO_H_
-struct vop_lock1_args {
-	struct vnode *a_vp;
-	int a_flags;
-	char *file;
-	int line;
-};
-#endif
-
-static int
-zfs_lock(struct vop_lock1_args *ap)
-{
-	vnode_t *vp;
-	znode_t *zp;
-	int err;
-
-#if __FreeBSD_version >= 1300064
-	err = vop_lock(ap);
-#else
-	err = vop_stdlock(ap);
-#endif
-	if (err == 0 && (ap->a_flags & LK_NOWAIT) == 0) {
-		vp = ap->a_vp;
-		zp = vp->v_data;
-		if (vp->v_mount != NULL && !VN_IS_DOOMED(vp) &&
-		    zp != NULL && (zp->z_pflags & ZFS_XATTR) == 0)
-			VERIFY(!RRM_LOCK_HELD(&zp->z_zfsvfs->z_teardown_lock));
-	}
-	return (err);
-}
-#endif
-
 struct vop_vector zfs_vnodeops;
 struct vop_vector zfs_fifoops;
 struct vop_vector zfs_shareops;
@@ -5808,17 +5780,9 @@ struct vop_vector zfs_vnodeops = {
 	.vop_putpages =		zfs_freebsd_putpages,
 	.vop_vptocnp =		zfs_vptocnp,
 #if __FreeBSD_version >= 1300064
-#ifdef DIAGNOSTIC
-	.vop_lock1 =		zfs_lock,
-#else
 	.vop_lock1 =		vop_lock,
-#endif
 	.vop_unlock =		vop_unlock,
 	.vop_islocked =		vop_islocked,
-#else
-#ifdef DIAGNOSTIC
-	.vop_lock1 =		zfs_lock,
-#endif
 #endif
 };
 VFS_VOP_VECTOR_REGISTER(zfs_vnodeops);

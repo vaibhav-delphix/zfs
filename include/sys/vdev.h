@@ -101,7 +101,6 @@ extern void vdev_rele(vdev_t *);
 extern int vdev_metaslab_init(vdev_t *vd, uint64_t txg);
 extern void vdev_metaslab_fini(vdev_t *vd);
 extern void vdev_metaslab_set_size(vdev_t *);
-extern void vdev_metaslab_group_create(vdev_t *vd);
 extern void vdev_expand(vdev_t *vd, uint64_t txg);
 extern void vdev_split(vdev_t *vd);
 extern void vdev_deadman(vdev_t *vd, char *tag);
@@ -133,6 +132,15 @@ extern void vdev_space_update(vdev_t *vd,
 extern int64_t vdev_deflated_space(vdev_t *vd, int64_t space);
 
 extern uint64_t vdev_psize_to_asize(vdev_t *vd, uint64_t psize);
+
+/*
+ * Return the amount of space allocated for a gang block header.
+ */
+static inline uint64_t
+vdev_gang_header_asize(vdev_t *vd)
+{
+	return (vdev_psize_to_asize(vd, SPA_GANGBLOCKSIZE));
+}
 
 extern int vdev_fault(spa_t *spa, uint64_t guid, vdev_aux_t aux);
 extern int vdev_degrade(spa_t *spa, uint64_t guid, vdev_aux_t aux);

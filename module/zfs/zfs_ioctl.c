@@ -159,7 +159,7 @@
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/errno.h>
-#include <sys/uio.h>
+#include <sys/uio_impl.h>
 #include <sys/file.h>
 #include <sys/kmem.h>
 #include <sys/cmn_err.h>
@@ -1413,15 +1413,17 @@ zfsvfs_hold(const char *name, void *tag, zfsvfs_t **zfvp, boolean_t writer)
 	if (getzfsvfs(name, zfvp) != 0)
 		error = zfsvfs_create(name, B_FALSE, zfvp);
 	if (error == 0) {
-		rrm_enter(&(*zfvp)->z_teardown_lock, (writer) ? RW_WRITER :
-		    RW_READER, tag);
+		if (writer)
+			ZFS_TEARDOWN_ENTER_WRITE(*zfvp, tag);
+		else
+			ZFS_TEARDOWN_ENTER_READ(*zfvp, tag);
 		if ((*zfvp)->z_unmounted) {
 			/*
 			 * XXX we could probably try again, since the unmounting
 			 * thread should be just about to disassociate the
 			 * objset from the zfsvfs.
 			 */
-			rrm_exit(&(*zfvp)->z_teardown_lock, tag);
+			ZFS_TEARDOWN_EXIT(*zfvp, tag);
 			return (SET_ERROR(EBUSY));
 		}
 	}
@@ -1431,7 +1433,7 @@ zfsvfs_hold(const char *name, void *tag, zfsvfs_t **zfvp, boolean_t writer)
 static void
 zfsvfs_rele(zfsvfs_t *zfsvfs, void *tag)
 {
-	rrm_exit(&zfsvfs->z_teardown_lock, tag);
+	ZFS_TEARDOWN_EXIT(zfsvfs, tag);
 
 	if (zfs_vfs_held(zfsvfs)) {
 		zfs_vfs_rele(zfsvfs);
@@ -3985,7 +3987,7 @@ zfs_ioc_pool_initialize(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
 	fnvlist_free(vdev_errlist);
 
 	spa_close(spa, FTAG);
-	return (total_errors > 0 ? EINVAL : 0);
+	return (total_errors > 0 ? SET_ERROR(EINVAL) : 0);
 }
 
 /*
@@ -4070,7 +4072,7 @@ zfs_ioc_pool_trim(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
 	fnvlist_free(vdev_errlist);
 
 	spa_close(spa, FTAG);
-	return (total_errors > 0 ? EINVAL : 0);
+	return (total_errors > 0 ? SET_ERROR(EINVAL) : 0);
 }
 
 /*
@@ -7417,6 +7419,7 @@ zfsdev_ioctl_common(uint_t vecnum, zfs_cmd_t *zc, int flag)
 	size_t saved_poolname_len = 0;
 	nvlist_t *innvl = NULL;
 	fstrans_cookie_t cookie;
+	hrtime_t start_time = gethrtime();
 
 	cmd = vecnum;
 	error = 0;
@@ -7575,6 +7578,8 @@ zfsdev_ioctl_common(uint_t vecnum, zfs_cmd_t *zc, int flag)
 				fnvlist_add_int64(lognv, ZPOOL_HIST_ERRNO,
 				    error);
 			}
+			fnvlist_add_int64(lognv, ZPOOL_HIST_ELAPSED_NS,
+			    gethrtime() - start_time);
 			(void) spa_history_log_nvl(spa, lognv);
 			spa_close(spa, FTAG);
 		}

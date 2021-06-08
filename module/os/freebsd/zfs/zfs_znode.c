@@ -372,7 +372,7 @@ zfs_znode_dmu_fini(znode_t *zp)
 {
 	ASSERT(MUTEX_HELD(ZFS_OBJ_MUTEX(zp->z_zfsvfs, zp->z_id)) ||
 	    zp->z_unlinked ||
-	    ZFS_TEARDOWN_INACTIVE_WLOCKED(zp->z_zfsvfs));
+	    ZFS_TEARDOWN_INACTIVE_WRITE_HELD(zp->z_zfsvfs));
 
 	sa_handle_destroy(zp->z_sa_hdl);
 	zp->z_sa_hdl = NULL;
@@ -1905,8 +1905,10 @@ zfs_obj_to_path_impl(objset_t *osp, uint64_t obj, sa_handle_t *hdl,
 		size_t complen;
 		int is_xattrdir;
 
-		if (prevdb)
+		if (prevdb) {
+			ASSERT(prevhdl != NULL);
 			zfs_release_sa_handle(prevhdl, prevdb, FTAG);
+		}
 
 		if ((error = zfs_obj_to_pobj(osp, sa_hdl, sa_table, &pobj,
 		    &is_xattrdir)) != 0)
@@ -2013,7 +2015,7 @@ zfs_obj_to_stats(objset_t *osp, uint64_t obj, zfs_stat_t *sb,
 
 
 void
-zfs_inode_update(znode_t *zp)
+zfs_znode_update_vfs(znode_t *zp)
 {
 	vm_object_t object;
 

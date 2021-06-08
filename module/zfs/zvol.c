@@ -473,7 +473,19 @@ zvol_replay_truncate(void *arg1, void *arg2, boolean_t byteswap)
 	offset = lr->lr_offset;
 	length = lr->lr_length;
 
-	return (dmu_free_long_range(zv->zv_objset, ZVOL_OBJ, offset, length));
+	dmu_tx_t *tx = dmu_tx_create(zv->zv_objset);
+	dmu_tx_mark_netfree(tx);
+	int error = dmu_tx_assign(tx, TXG_WAIT);
+	if (error != 0) {
+		dmu_tx_abort(tx);
+	} else {
+		zil_replaying(zv->zv_zilog, tx);
+		dmu_tx_commit(tx);
+		error = dmu_free_long_range(zv->zv_objset, ZVOL_OBJ, offset,
+		    length);
+	}
+
+	return (error);
 }
 
 /*
@@ -513,6 +525,7 @@ zvol_replay_write(void *arg1, void *arg2, boolean_t byteswap)
 		dmu_tx_abort(tx);
 	} else {
 		dmu_write(os, ZVOL_OBJ, offset, length, data, tx);
+		zil_replaying(zv->zv_zilog, tx);
 		dmu_tx_commit(tx);
 	}
 
@@ -572,7 +585,7 @@ zvol_log_write(zvol_state_t *zv, dmu_tx_t *tx, uint64_t offset,
 
 	if (zilog->zl_logbias == ZFS_LOGBIAS_THROUGHPUT)
 		write_state = WR_INDIRECT;
-	else if (!spa_has_log_device(zilog->zl_spa) &&
+	else if (!spa_has_slogs(zilog->zl_spa) &&
 	    size >= blocksize && blocksize > zvol_immediate_write_sz)
 		write_state = WR_INDIRECT;
 	else if (sync)
@@ -660,7 +673,8 @@ zvol_get_done(zgd_t *zgd, int error)
  * Get data to generate a TX_WRITE intent log record.
  */
 int
-zvol_get_data(void *arg, lr_write_t *lr, char *buf, struct lwb *lwb, zio_t *zio)
+zvol_get_data(void *arg, uint64_t arg2, lr_write_t *lr, char *buf,
+    struct lwb *lwb, zio_t *zio)
 {
 	zvol_state_t *zv = arg;
 	uint64_t offset = lr->lr_offset;
