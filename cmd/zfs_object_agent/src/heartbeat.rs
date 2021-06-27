@@ -44,7 +44,7 @@ impl HeartbeatPhys {
         timeout: Option<Duration>,
     ) -> Result<
         rusoto_s3::PutObjectOutput,
-        OAError<rusoto_core::RusotoError<rusoto_s3::PutObjectError>>,
+        OAError<rusoto_s3::PutObjectError>,
     > {
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();

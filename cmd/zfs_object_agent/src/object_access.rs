@@ -9,7 +9,7 @@ use log::*;
 use lru::LruCache;
 use rand::prelude::*;
 use rusoto_core::{ByteStream, RusotoError};
-use rusoto_credential::DefaultCredentialsProvider;
+use rusoto_credential::{AutoRefreshingProvider, ChainProvider, ProfileProvider};
 use rusoto_s3::*;
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,6 +32,14 @@ lazy_static! {
         Ok(val) => format!("{}/", val),
         Err(_) => "".to_string(),
     };
+    static ref NON_RETRYABLE_ERRORS: Vec<StatusCode> = vec![
+        StatusCode::BAD_REQUEST,
+        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
+        StatusCode::METHOD_NOT_ALLOWED,
+        StatusCode::PRECONDITION_FAILED,
+        StatusCode::PAYLOAD_TOO_LARGE,
+    ];
 }
 
 // log operations that take longer than this with info!()
@@ -58,31 +66,41 @@ where
     E: core::fmt::Debug + core::fmt::Display + std::error::Error,
 {
     TimeoutError(Elapsed),
-    RequestError(E),
+    RequestError(RusotoError<E>),
 }
 
 impl<E> Display for OAError<E>
 where
-    E: core::fmt::Debug + core::fmt::Display + std::error::Error,
+    E: core::fmt::Debug + core::fmt::Display + std::error::Error + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OAError::TimeoutError(e) => e.fmt(f),
-            OAError::RequestError(e) => std::fmt::Display::fmt(&e, f),
+            OAError::RequestError(e) => e.fmt(f),
         }
     }
 }
 
-impl<E> Error for OAError<E> where E: core::fmt::Debug + core::fmt::Display + std::error::Error {}
+impl<E> Error for OAError<E> where
+    E: core::fmt::Debug + core::fmt::Display + std::error::Error + 'static
+{
+}
 
-async fn retry_impl<F, O, E>(msg: &str, f: impl Fn() -> F) -> Result<O, E>
+async fn retry_impl<F, O, E>(msg: &str, f: impl Fn() -> F) -> Result<O, RusotoError<E>>
 where
-    E: core::fmt::Debug + core::fmt::Display + std::error::Error,
-    F: Future<Output = (bool, Result<O, E>)>,
+    E: std::error::Error,
+    F: Future<Output = (bool, Result<O, RusotoError<E>>)>,
 {
     let mut delay = Duration::from_secs_f64(thread_rng().gen_range(0.001..0.2));
-    let result = loop {
+    loop {
         match f().await {
+            (true, res @ Err(RusotoError::Service(_))) => return res,
+            (true, res @ Err(RusotoError::Credentials(_))) => return res,
+            (true, Err(RusotoError::Unknown(bhr))) => {
+                if NON_RETRYABLE_ERRORS.contains(&bhr.status) {
+                    return Err(RusotoError::Unknown(bhr));
+                }
+            }
             (true, Err(e)) => {
                 debug!(
                     "{} returned: {:?}; retrying in {}ms",
@@ -98,13 +116,12 @@ where
                 }
             }
             (_, res) => {
-                break res;
+                return res;
             }
         }
         tokio::time::sleep(delay).await;
         delay = delay.mul_f64(thread_rng().gen_range(1.5..2.5));
-    };
-    result
+    }
 }
 
 async fn retry<F, O, E>(
@@ -114,7 +131,7 @@ async fn retry<F, O, E>(
 ) -> Result<O, OAError<E>>
 where
     E: core::fmt::Debug + core::fmt::Display + std::error::Error,
-    F: Future<Output = (bool, Result<O, E>)>,
+    F: Future<Output = (bool, Result<O, RusotoError<E>>)>,
 {
     debug!("{}: begin", msg);
     let begin = Instant::now();
@@ -161,14 +178,23 @@ impl ObjectAccess {
         rusoto_s3::S3Client::new_with(http_client, creds, region)
     }
 
-    pub fn get_client(endpoint: &str, region_str: &str) -> S3Client {
-        info!("region: {:?}", region_str);
+    pub fn get_client(endpoint: &str, region_str: &str, profile: Option<String>) -> S3Client {
+        info!("region: {}", region_str);
         info!("Endpoint: {}", endpoint);
+        info!("Profile: {:?}", profile);
 
-        let creds = DefaultCredentialsProvider::new().unwrap();
+        let auto_refreshing_provider =
+            AutoRefreshingProvider::new(ChainProvider::with_profile_provider(
+                ProfileProvider::with_default_credentials(
+                    profile.unwrap_or_else(|| "default".to_owned()),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+
         let http_client = rusoto_core::HttpClient::new().unwrap();
         let region = ObjectAccess::get_custom_region(endpoint, region_str);
-        rusoto_s3::S3Client::new_with(http_client, creds, region)
+        rusoto_s3::S3Client::new_with(http_client, auto_refreshing_provider, region)
     }
 
     pub fn from_client(
@@ -187,8 +213,8 @@ impl ObjectAccess {
         }
     }
 
-    pub fn new(endpoint: &str, region_str: &str, bucket: &str, readonly: bool) -> Self {
-        let client = ObjectAccess::get_client(endpoint, region_str);
+    pub fn new(endpoint: &str, region_str: &str, bucket: &str, profile: Option<String>, readonly: bool) -> Self {
+        let client = ObjectAccess::get_client(endpoint, region_str, profile);
 
         ObjectAccess {
             client,
@@ -397,16 +423,7 @@ impl ObjectAccess {
                 key: prefixed(key),
                 ..Default::default()
             };
-            let res = self.client.head_object(req).await;
-            match res {
-                Err(RusotoError::Service(HeadObjectError::NoSuchKey(_))) => (false, res),
-                Err(RusotoError::Unknown(rusoto_core::request::BufferedHttpResponse {
-                    status: StatusCode::NOT_FOUND,
-                    body: _,
-                    headers: _,
-                })) => (false, res),
-                _ => (true, res),
-            }
+            (true, self.client.head_object(req).await)
         })
         .await;
         res.ok()
@@ -421,7 +438,7 @@ impl ObjectAccess {
         key: &str,
         data: Vec<u8>,
         timeout: Option<Duration>,
-    ) -> Result<PutObjectOutput, OAError<RusotoError<PutObjectError>>> {
+    ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
         let len = data.len();
         let bytes = Bytes::from(data);
         assert!(!self.readonly);
@@ -468,7 +485,7 @@ impl ObjectAccess {
         key: &str,
         data: Vec<u8>,
         timeout: Option<Duration>,
-    ) -> Result<PutObjectOutput, OAError<RusotoError<PutObjectError>>> {
+    ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
         Self::invalidate_cache(key, &data);
 
         self.put_object_impl(key, data, timeout).await

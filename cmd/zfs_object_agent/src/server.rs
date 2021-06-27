@@ -251,10 +251,16 @@ impl Server {
         let region_str = nvl.lookup_string("region").unwrap();
         let endpoint = nvl.lookup_string("endpoint").unwrap();
         let readonly = nvl.lookup("readonly").is_ok();
+        let credentials_profile: Option<String> = nvl
+            .lookup_string("credentials_profile")
+            .ok()
+            .map(|s| s.to_str().unwrap().to_string());
+
         ObjectAccess::new(
             endpoint.to_str().unwrap(),
             region_str.to_str().unwrap(),
             bucket_name.to_str().unwrap(),
+            credentials_profile,
             readonly,
         )
     }
@@ -262,10 +268,18 @@ impl Server {
     async fn get_pools(&mut self, nvl: &NvList) {
         let region_cstr = nvl.lookup_string("region").unwrap();
         let endpoint_cstr = nvl.lookup_string("endpoint").unwrap();
-
         let region = region_cstr.to_str().unwrap();
         let endpoint = endpoint_cstr.to_str().unwrap();
-        let mut client = ObjectAccess::get_client(endpoint, region);
+        let credentials_profile: Option<String> = nvl
+            .lookup_string("credentials_profile")
+            .ok()
+            .map(|s| s.to_str().unwrap().to_owned());
+
+        let mut client = ObjectAccess::get_client(
+            endpoint,
+            region,
+            credentials_profile,
+        );
         let mut resp = NvList::new_unique_names();
         let mut buckets = vec![];
         if let Ok(bucket) = nvl.lookup_string("bucket") {
