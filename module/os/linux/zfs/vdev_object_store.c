@@ -268,7 +268,7 @@ agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 	char *iov_buf = fnvlist_pack(nv, &iov_size);
 	uint64_t size64 = iov_size;
 	zfs_dbgmsg("sending %llu-byte request to agent type=%s",
-	    size64, fnvlist_lookup_string(nv, AGENT_TYPE));
+	    (u_longlong_t)size64, fnvlist_lookup_string(nv, AGENT_TYPE));
 
 	iov[0].iov_base = &size64;
 	iov[0].iov_len = sizeof (size64);
@@ -359,7 +359,7 @@ again:
 	fnvlist_add_uint64(nv, AGENT_REQUEST_ID, req);
 	vosr->vosr_req = req;
 	zfs_dbgmsg("agent_request_zio(req=%llu)",
-	    req);
+	    (u_longlong_t)req);
 	mutex_exit(&vos->vos_outstanding_lock);
 
 	agent_request(vos, nv, FTAG);
@@ -417,7 +417,8 @@ agent_io_block_alloc(zio_t *zio)
 	fnvlist_add_uint64(nv, AGENT_SIZE, zio->io_size);
 	fnvlist_add_uint64(nv, AGENT_BLKID, blockid);
 	zfs_dbgmsg("agent_io_block_alloc(guid=%llu blkid=%llu len=%llu) %s",
-	    spa_guid(zio->io_spa), blockid, zio->io_size,
+	    (u_longlong_t)spa_guid(zio->io_spa), (u_longlong_t)blockid,
+	    (u_longlong_t)zio->io_size,
 	    zio->io_type == ZIO_TYPE_WRITE ? "WRITE" : "READ");
 	return (nv);
 }
@@ -455,7 +456,7 @@ agent_free_block(vdev_object_store_t *vos, uint64_t offset, uint64_t asize)
 	fnvlist_add_uint64(nv, AGENT_BLKID, blockid);
 	fnvlist_add_uint64(nv, AGENT_SIZE, asize);
 	zfs_dbgmsg("agent_free_block(blkid=%llu, asize=%llu)",
-	    blockid, asize);
+	    (u_longlong_t)blockid, (u_longlong_t)asize);
 	/*
 	 * We need to ensure that we only issue a request when the
 	 * socket is ready. Otherwise, we block here since the agent
@@ -488,7 +489,7 @@ agent_create_pool(vdev_t *vd, vdev_object_store_t *vos)
 	fnvlist_add_string(nv, AGENT_REGION, vos->vos_region);
 	fnvlist_add_string(nv, AGENT_BUCKET, vd->vdev_path);
 	zfs_dbgmsg("agent_create_pool(guid=%llu name=%s bucket=%s)",
-	    spa_guid(vd->vdev_spa),
+	    (u_longlong_t)spa_guid(vd->vdev_spa),
 	    spa_name(vd->vdev_spa),
 	    vd->vdev_path);
 	agent_request(vos, nv, FTAG);
@@ -517,7 +518,7 @@ agent_open_pool(vdev_t *vd, vdev_object_store_t *vos)
 	fnvlist_add_string(nv, AGENT_REGION, vos->vos_region);
 	fnvlist_add_string(nv, AGENT_BUCKET, vd->vdev_path);
 	zfs_dbgmsg("agent_open_pool(guid=%llu bucket=%s)",
-	    spa_guid(vd->vdev_spa),
+	    (u_longlong_t)spa_guid(vd->vdev_spa),
 	    vd->vdev_path);
 	agent_request(vos, nv, FTAG);
 
@@ -536,7 +537,7 @@ agent_begin_txg(vdev_object_store_t *vos, uint64_t txg)
 	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_BEGIN_TXG);
 	fnvlist_add_uint64(nv, AGENT_TXG, txg);
 	zfs_dbgmsg("agent_begin_txg(%llu)",
-	    txg);
+	    (u_longlong_t)txg);
 
 	agent_request(vos, nv, FTAG);
 	fnvlist_free(nv);
@@ -553,7 +554,7 @@ agent_resume_txg(vdev_object_store_t *vos, uint64_t txg)
 	fnvlist_add_uint64(nv, AGENT_TXG, txg);
 
 	zfs_dbgmsg("agent_resume_txg(%llu)",
-	    txg);
+	    (u_longlong_t)txg);
 	agent_request(vos, nv, FTAG);
 	fnvlist_free(nv);
 }
@@ -591,7 +592,7 @@ agent_end_txg(vdev_object_store_t *vos, uint64_t txg, void *ub_buf,
 	fnvlist_add_uint8_array(nv, AGENT_CONFIG, config_buf, config_len);
 
 	zfs_dbgmsg("agent_end_txg(%llu)",
-	    txg);
+	    (u_longlong_t)txg);
 	agent_request(vos, nv, FTAG);
 	fnvlist_free(nv);
 }
@@ -661,7 +662,8 @@ agent_resume(void *arg)
 			nvlist_t *nv = agent_io_block_alloc(zio);
 			fnvlist_add_uint64(nv, AGENT_REQUEST_ID, req);
 			zfs_dbgmsg("ZIO REISSUE (%px) req %llu, blk %llu",
-			    zio, req, zio->io_offset >> 9);
+			    zio, (u_longlong_t)req,
+			    (u_longlong_t)zio->io_offset >> 9);
 			if (agent_request(vos, nv, FTAG) != 0) {
 				zfs_dbgmsg("agent_resume failed");
 				agent_io_block_free(nv);
@@ -867,9 +869,9 @@ agent_reader(void *arg)
 		vos->vos_stats.voss_objects_count =
 		    fnvlist_lookup_uint64(nv, "objects_count");
 		/*
-		vos->vos_vdev->vdev_stat.vs_alloc =
-		    vos->vos_stats.voss_blocks_bytes;
-		    */
+		 * vos->vos_vdev->vdev_stat.vs_alloc =
+		 *  vos->vos_stats.voss_blocks_bytes;
+		 */
 		mutex_exit(&vos->vos_stats_lock);
 
 		metaslab_space_update(vos->vos_vdev,
@@ -898,8 +900,8 @@ agent_reader(void *arg)
 		    AGENT_NEXT_BLOCK);
 		vos->vos_next_block = next_block;
 
-		zfs_dbgmsg("got pool open done len=%llu block=%llu",
-		    len, next_block);
+		zfs_dbgmsg("got pool open done len=%u block=%llu",
+		    len, (u_longlong_t)next_block);
 
 		fnvlist_free(nv);
 		mutex_enter(&vos->vos_outstanding_lock);
@@ -914,7 +916,7 @@ agent_reader(void *arg)
 		void *data = fnvlist_lookup_uint8_array(nv,
 		    AGENT_DATA, &len);
 		zfs_dbgmsg("got read done req=%llu datalen=%u",
-		    req, len);
+		    (u_longlong_t)req, len);
 		VERIFY3U(req, <, VOS_MAXREQ);
 		zio_t *zio = agent_complete_zio(vos, req);
 		VERIFY3U(fnvlist_lookup_uint64(nv, AGENT_BLKID), ==,
@@ -927,7 +929,7 @@ agent_reader(void *arg)
 	} else if (strcmp(type, "write done") == 0) {
 		uint64_t req = fnvlist_lookup_uint64(nv,
 		    AGENT_REQUEST_ID);
-		zfs_dbgmsg("got write done req=%llu", req);
+		zfs_dbgmsg("got write done req=%llu", (u_longlong_t)req);
 		VERIFY3U(req, <, VOS_MAXREQ);
 		zio_t *zio = agent_complete_zio(vos, req);
 		VERIFY3U(fnvlist_lookup_uint64(nv, AGENT_BLKID), ==,

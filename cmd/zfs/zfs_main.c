@@ -52,6 +52,8 @@
 #include <zone.h>
 #include <grp.h>
 #include <pwd.h>
+#include <umem.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/list.h>
 #include <sys/mkdev.h>
@@ -78,7 +80,6 @@
 #include "zfs_iter.h"
 #include "zfs_util.h"
 #include "zfs_comutil.h"
-#include "libzfs_impl.h"
 #include "zfs_projectutil.h"
 
 libzfs_handle_t *g_zfs;
@@ -726,6 +727,32 @@ finish_progress(char *done)
 	}
 	free(pt_header);
 	pt_header = NULL;
+}
+
+/* This function checks if the passed fd refers to /dev/null or /dev/zero */
+#ifdef __linux__
+static boolean_t
+is_dev_nullzero(int fd)
+{
+	struct stat st;
+	fstat(fd, &st);
+	return (major(st.st_rdev) == 1 && (minor(st.st_rdev) == 3 /* null */ ||
+	    minor(st.st_rdev) == 5 /* zero */));
+}
+#endif
+
+static void
+note_dev_error(int err, int fd)
+{
+#ifdef __linux__
+	if (err == EINVAL && is_dev_nullzero(fd)) {
+		(void) fprintf(stderr,
+		    gettext("Error: Writing directly to /dev/{null,zero} files"
+		    " on certain kernels is not currently implemented.\n"
+		    "(As a workaround, "
+		    "try \"zfs send [...] | cat > /dev/null\")\n"));
+	}
+#endif
 }
 
 static int
@@ -3316,7 +3343,7 @@ zfs_do_userspace(int argc, char **argv)
 	if ((zhp = zfs_path_to_zhandle(g_zfs, argv[0], ZFS_TYPE_FILESYSTEM |
 	    ZFS_TYPE_SNAPSHOT)) == NULL)
 		return (1);
-	if (zhp->zfs_head_type != ZFS_TYPE_FILESYSTEM) {
+	if (zfs_get_underlying_type(zhp) != ZFS_TYPE_FILESYSTEM) {
 		(void) fprintf(stderr, gettext("operation is only applicable "
 		    "to filesystems and their snapshots\n"));
 		zfs_close(zhp);
@@ -4571,11 +4598,16 @@ zfs_do_send(int argc, char **argv)
 
 		err = zfs_send_saved(zhp, &flags, STDOUT_FILENO,
 		    resume_token);
+		if (err != 0)
+			note_dev_error(errno, STDOUT_FILENO);
 		zfs_close(zhp);
 		return (err != 0);
 	} else if (resume_token != NULL) {
-		return (zfs_send_resume(g_zfs, &flags, STDOUT_FILENO,
-		    resume_token));
+		err = zfs_send_resume(g_zfs, &flags, STDOUT_FILENO,
+		    resume_token);
+		if (err != 0)
+			note_dev_error(errno, STDOUT_FILENO);
+		return (err);
 	}
 
 	if (flags.skipmissing && !flags.replicate) {
@@ -4626,6 +4658,8 @@ zfs_do_send(int argc, char **argv)
 		err = zfs_send_one(zhp, fromname, STDOUT_FILENO, &flags,
 		    redactbook);
 		zfs_close(zhp);
+		if (err != 0)
+			note_dev_error(errno, STDOUT_FILENO);
 		return (err != 0);
 	}
 
@@ -4702,6 +4736,7 @@ zfs_do_send(int argc, char **argv)
 		nvlist_free(dbgnv);
 	}
 	zfs_close(zhp);
+	note_dev_error(errno, STDOUT_FILENO);
 
 	return (err != 0);
 }

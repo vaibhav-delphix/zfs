@@ -38,6 +38,9 @@ dnl # When debugging is enabled:
 dnl # - Enable all ASSERTs (-DDEBUG)
 dnl # - Promote all compiler warnings to errors (-Werror)
 dnl #
+dnl # (If INVARIANTS is detected, we need to force DEBUG, or strange panics
+dnl # can ensue.)
+dnl #
 AC_DEFUN([ZFS_AC_DEBUG], [
 	AC_MSG_CHECKING([whether assertion support will be enabled])
 	AC_ARG_ENABLE([debug],
@@ -52,6 +55,20 @@ AC_DEFUN([ZFS_AC_DEBUG], [
 		["xno"],
 		[ZFS_AC_DEBUG_DISABLE],
 		[AC_MSG_ERROR([Unknown option $enable_debug])])
+
+	AS_CASE(["x$enable_invariants"],
+		["xyes"],
+		[],
+		["xno"],
+		[],
+		[ZFS_AC_DEBUG_INVARIANTS_DETECT])
+
+	AS_CASE(["x$enable_invariants"],
+		["xyes"],
+		[ZFS_AC_DEBUG_ENABLE],
+		["xno"],
+		[],
+		[AC_MSG_ERROR([Unknown option $enable_invariants])])
 
 	AC_SUBST(DEBUG_CFLAGS)
 	AC_SUBST(DEBUG_CPPFLAGS)
@@ -213,6 +230,7 @@ AC_DEFUN([ZFS_AC_CONFIG_ALWAYS], [
 	ZFS_AC_CONFIG_ALWAYS_PYZFS
 	ZFS_AC_CONFIG_ALWAYS_SED
 	ZFS_AC_CONFIG_ALWAYS_CPPCHECK
+	ZFS_AC_CONFIG_ALWAYS_SHELLCHECK
 	ZFS_AC_CONFIG_ALWAYS_RUST
 ])
 

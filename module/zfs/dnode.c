@@ -598,7 +598,8 @@ dnode_allocate(dnode_t *dn, dmu_object_type_t ot, int blocksize, int ibs,
 	ibs = MIN(MAX(ibs, DN_MIN_INDBLKSHIFT), DN_MAX_INDBLKSHIFT);
 
 	dprintf("os=%p obj=%llu txg=%llu blocksize=%d ibs=%d dn_slots=%d\n",
-	    dn->dn_objset, dn->dn_object, tx->tx_txg, blocksize, ibs, dn_slots);
+	    dn->dn_objset, (u_longlong_t)dn->dn_object,
+	    (u_longlong_t)tx->tx_txg, blocksize, ibs, dn_slots);
 	DNODE_STAT_BUMP(dnode_allocate);
 
 	ASSERT(dn->dn_type == DMU_OT_NONE);
@@ -761,7 +762,6 @@ dnode_move_impl(dnode_t *odn, dnode_t *ndn)
 	ASSERT(!RW_LOCK_HELD(&odn->dn_struct_rwlock));
 	ASSERT(MUTEX_NOT_HELD(&odn->dn_mtx));
 	ASSERT(MUTEX_NOT_HELD(&odn->dn_dbufs_mtx));
-	ASSERT(!MUTEX_HELD(&odn->dn_zfetch.zf_lock));
 
 	/* Copy fields. */
 	ndn->dn_objset = odn->dn_objset;
@@ -831,9 +831,7 @@ dnode_move_impl(dnode_t *odn, dnode_t *ndn)
 	ndn->dn_newgid = odn->dn_newgid;
 	ndn->dn_newprojid = odn->dn_newprojid;
 	ndn->dn_id_flags = odn->dn_id_flags;
-	dmu_zfetch_init(&ndn->dn_zfetch, NULL);
-	list_move_tail(&ndn->dn_zfetch.zf_stream, &odn->dn_zfetch.zf_stream);
-	ndn->dn_zfetch.zf_dnode = odn->dn_zfetch.zf_dnode;
+	dmu_zfetch_init(&ndn->dn_zfetch, ndn);
 
 	/*
 	 * Update back pointers. Updating the handle fixes the back pointer of
@@ -841,9 +839,6 @@ dnode_move_impl(dnode_t *odn, dnode_t *ndn)
 	 */
 	ASSERT(ndn->dn_handle->dnh_dnode == odn);
 	ndn->dn_handle->dnh_dnode = ndn;
-	if (ndn->dn_zfetch.zf_dnode == odn) {
-		ndn->dn_zfetch.zf_dnode = ndn;
-	}
 
 	/*
 	 * Invalidate the original dnode by clearing all of its back pointers.
@@ -1686,7 +1681,7 @@ dnode_setdirty(dnode_t *dn, dmu_tx_t *tx)
 	 */
 	dmu_objset_userquota_get_ids(dn, B_TRUE, tx);
 
-	multilist_t *dirtylist = os->os_dirty_dnodes[txg & TXG_MASK];
+	multilist_t *dirtylist = &os->os_dirty_dnodes[txg & TXG_MASK];
 	multilist_sublist_t *mls = multilist_sublist_lock_obj(dirtylist, dn);
 
 	/*
@@ -1705,7 +1700,7 @@ dnode_setdirty(dnode_t *dn, dmu_tx_t *tx)
 	ASSERT0(dn->dn_next_bonustype[txg & TXG_MASK]);
 
 	dprintf_ds(os->os_dsl_dataset, "obj=%llu txg=%llu\n",
-	    dn->dn_object, txg);
+	    (u_longlong_t)dn->dn_object, (u_longlong_t)txg);
 
 	multilist_sublist_insert_head(mls, dn);
 
@@ -2268,7 +2263,8 @@ done:
 		range_tree_add(dn->dn_free_ranges[txgoff], blkid, nblks);
 	}
 	dprintf_dnode(dn, "blkid=%llu nblks=%llu txg=%llu\n",
-	    blkid, nblks, tx->tx_txg);
+	    (u_longlong_t)blkid, (u_longlong_t)nblks,
+	    (u_longlong_t)tx->tx_txg);
 	mutex_exit(&dn->dn_mtx);
 
 	dbuf_free_range(dn, blkid, blkid + nblks - 1, tx);

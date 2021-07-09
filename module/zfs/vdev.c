@@ -28,6 +28,7 @@
  * Copyright 2017 Joyent, Inc.
  * Copyright (c) 2017, Intel Corporation.
  * Copyright (c) 2019, Datto Inc. All rights reserved.
+ * Copyright [2021] Hewlett Packard Enterprise Development LP
  */
 
 #include <sys/zfs_context.h>
@@ -164,7 +165,8 @@ vdev_dbgmsg_print_tree(vdev_t *vd, int indent)
 	char state[20];
 
 	if (vd->vdev_ishole || vd->vdev_ops == &vdev_missing_ops) {
-		zfs_dbgmsg("%*svdev %u: %s", indent, "", vd->vdev_id,
+		zfs_dbgmsg("%*svdev %llu: %s", indent, "",
+		    (u_longlong_t)vd->vdev_id,
 		    vd->vdev_ops->vdev_op_type);
 		return;
 	}
@@ -1444,7 +1446,7 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 	vd->vdev_ms = mspp;
 	vd->vdev_ms_count = newc;
 	zfs_dbgmsg("vdev_metaslab_init: setting vdev_ms_count: %llu",
-	    vd->vdev_ms_count);
+	    (u_longlong_t)vd->vdev_ms_count);
 
 	for (uint64_t m = oldc; m < newc; m++) {
 		uint64_t object = 0;
@@ -2257,7 +2259,7 @@ vdev_validate(vdev_t *vd)
 		txg = spa_last_synced_txg(spa);
 
 	if ((label = vdev_label_read_config(vd, txg)) == NULL) {
-		vdev_set_state(vd, B_TRUE, VDEV_STATE_CANT_OPEN,
+		vdev_set_state(vd, B_FALSE, VDEV_STATE_CANT_OPEN,
 		    VDEV_AUX_BAD_LABEL);
 		vdev_dbgmsg(vd, "vdev_validate: failed reading config for "
 		    "txg %llu", (u_longlong_t)txg);
@@ -2669,7 +2671,8 @@ vdev_metaslab_set_size(vdev_t *vd)
 
 	if (vdev_is_object_based(vd)) {
 		vd->vdev_ms_shift = highbit64(asize) - 1;
-		zfs_dbgmsg("vdev_metaslab_set_size: %llu", vd->vdev_ms_shift);
+		zfs_dbgmsg("vdev_metaslab_set_size: %llu",
+		    (u_longlong_t)vd->vdev_ms_shift);
 		return;
 	}
 
@@ -5257,7 +5260,7 @@ vdev_deadman(vdev_t *vd, char *tag)
 			zio_t *fio;
 			uint64_t delta;
 
-			zfs_dbgmsg("slow vdev: %s has %d active IOs",
+			zfs_dbgmsg("slow vdev: %s has %lu active IOs",
 			    vd->vdev_path, avl_numnodes(&vq->vq_active_tree));
 
 			/*

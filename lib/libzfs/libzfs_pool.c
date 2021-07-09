@@ -563,8 +563,8 @@ zpool_valid_proplist(libzfs_handle_t *hdl, const char *poolname,
 			if (intval < version ||
 			    !SPA_VERSION_IS_SUPPORTED(intval)) {
 				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-				    "property '%s' number %d is invalid."),
-				    propname, intval);
+				    "property '%s' number %llu is invalid."),
+				    propname, (unsigned long long)intval);
 				(void) zfs_error(hdl, EZFS_BADVERSION, errbuf);
 				goto error;
 			}
@@ -574,10 +574,11 @@ zpool_valid_proplist(libzfs_handle_t *hdl, const char *poolname,
 			if (intval != 0 &&
 			    (intval < ASHIFT_MIN || intval > ASHIFT_MAX)) {
 				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-				    "property '%s' number %d is invalid, only "
-				    "values between %" PRId32 " and "
-				    "%" PRId32 " are allowed."),
-				    propname, intval, ASHIFT_MIN, ASHIFT_MAX);
+				    "property '%s' number %llu is invalid, "
+				    "only values between %" PRId32 " and %"
+				    PRId32 " are allowed."),
+				    propname, (unsigned long long)intval,
+				    ASHIFT_MIN, ASHIFT_MAX);
 				(void) zfs_error(hdl, EZFS_BADPROP, errbuf);
 				goto error;
 			}
@@ -685,7 +686,7 @@ zpool_valid_proplist(libzfs_handle_t *hdl, const char *poolname,
 			case ZPOOL_COMPATIBILITY_BADFILE:
 			case ZPOOL_COMPATIBILITY_BADTOKEN:
 			case ZPOOL_COMPATIBILITY_NOFILES:
-				zfs_error_aux(hdl, report);
+				zfs_error_aux(hdl, "%s", report);
 				(void) zfs_error(hdl, EZFS_BADPROP, errbuf);
 				goto error;
 			}
@@ -1648,10 +1649,6 @@ zpool_export_common(zpool_handle_t *zhp, boolean_t force, boolean_t hardforce,
     const char *log_str)
 {
 	zfs_cmd_t zc = {"\0"};
-	char msg[1024];
-
-	(void) snprintf(msg, sizeof (msg), dgettext(TEXT_DOMAIN,
-	    "cannot export '%s'"), zhp->zpool_name);
 
 	(void) strlcpy(zc.zc_name, zhp->zpool_name, sizeof (zc.zc_name));
 	zc.zc_cookie = force;
@@ -1666,11 +1663,13 @@ zpool_export_common(zpool_handle_t *zhp, boolean_t force, boolean_t hardforce,
 			    "'%s' has an active shared spare which could be"
 			    " used by other pools once '%s' is exported."),
 			    zhp->zpool_name, zhp->zpool_name);
-			return (zfs_error(zhp->zpool_hdl, EZFS_ACTIVE_SPARE,
-			    msg));
+			return (zfs_error_fmt(zhp->zpool_hdl, EZFS_ACTIVE_SPARE,
+			    dgettext(TEXT_DOMAIN, "cannot export '%s'"),
+			    zhp->zpool_name));
 		default:
 			return (zpool_standard_error_fmt(zhp->zpool_hdl, errno,
-			    msg));
+			    dgettext(TEXT_DOMAIN, "cannot export '%s'"),
+			    zhp->zpool_name));
 		}
 	}
 
@@ -2080,7 +2079,7 @@ zpool_import_props(libzfs_handle_t *hdl, nvlist_t *config, const char *newname,
 					    "the zgenhostid(8) command.\n"));
 				}
 
-				(void) zfs_error_aux(hdl, aux);
+				(void) zfs_error_aux(hdl, "%s", aux);
 			}
 			(void) zfs_error(hdl, EZFS_ACTIVE_POOL, desc);
 			break;
@@ -4310,7 +4309,7 @@ zfs_save_arguments(int argc, char **argv, char *string, int len)
 {
 	int i;
 
-	(void) strlcpy(string, basename(argv[0]), len);
+	(void) strlcpy(string, zfs_basename(argv[0]), len);
 	for (i = 1; i < argc; i++) {
 		(void) strlcat(string, " ", len);
 		(void) strlcat(string, argv[i], len);
@@ -4520,13 +4519,10 @@ int
 zpool_events_clear(libzfs_handle_t *hdl, int *count)
 {
 	zfs_cmd_t zc = {"\0"};
-	char msg[1024];
-
-	(void) snprintf(msg, sizeof (msg), dgettext(TEXT_DOMAIN,
-	    "cannot clear events"));
 
 	if (zfs_ioctl(hdl, ZFS_IOC_EVENTS_CLEAR, &zc) != 0)
-		return (zpool_standard_error_fmt(hdl, errno, msg));
+		return (zpool_standard_error(hdl, errno,
+		    dgettext(TEXT_DOMAIN, "cannot clear events")));
 
 	if (count != NULL)
 		*count = (int)zc.zc_cookie; /* # of events cleared */
@@ -4800,11 +4796,16 @@ zpool_load_compat(const char *compat, boolean_t *features, char *report,
 	 * as they're only needed if the filename is relative
 	 * which will be checked during the openat().
 	 */
-#ifndef O_PATH
-#define	O_PATH O_RDONLY
+
+/* O_PATH safer than O_RDONLY if system allows it */
+#if defined(O_PATH)
+#define	ZC_DIR_FLAGS (O_DIRECTORY | O_CLOEXEC | O_PATH)
+#else
+#define	ZC_DIR_FLAGS (O_DIRECTORY | O_CLOEXEC | O_RDONLY)
 #endif
-	sdirfd = open(ZPOOL_SYSCONF_COMPAT_D, O_DIRECTORY | O_PATH | O_CLOEXEC);
-	ddirfd = open(ZPOOL_DATA_COMPAT_D, O_DIRECTORY | O_PATH | O_CLOEXEC);
+
+	sdirfd = open(ZPOOL_SYSCONF_COMPAT_D, ZC_DIR_FLAGS);
+	ddirfd = open(ZPOOL_DATA_COMPAT_D, ZC_DIR_FLAGS);
 
 	(void) strlcpy(l_compat, compat, ZFS_MAXPROPLEN);
 
@@ -4818,8 +4819,8 @@ zpool_load_compat(const char *compat, boolean_t *features, char *report,
 
 		/* try sysconfdir first, then datadir */
 		source = Z_SYSCONF;
-		if ((featfd = openat(sdirfd, file, 0, O_RDONLY)) < 0) {
-			featfd = openat(ddirfd, file, 0, O_RDONLY);
+		if ((featfd = openat(sdirfd, file, O_RDONLY | O_CLOEXEC)) < 0) {
+			featfd = openat(ddirfd, file, O_RDONLY | O_CLOEXEC);
 			source = Z_DATA;
 		}
 
@@ -4835,13 +4836,22 @@ zpool_load_compat(const char *compat, boolean_t *features, char *report,
 			continue;
 		}
 
+/* Prefault the file if system allows */
+#if defined(MAP_POPULATE)
+#define	ZC_MMAP_FLAGS (MAP_PRIVATE | MAP_POPULATE)
+#elif defined(MAP_PREFAULT_READ)
+#define	ZC_MMAP_FLAGS (MAP_PRIVATE | MAP_PREFAULT_READ)
+#else
+#define	ZC_MMAP_FLAGS (MAP_PRIVATE)
+#endif
+
 		/* private mmap() so we can strtok safely */
-		fc = (char *)mmap(NULL, fs.st_size,
-		    PROT_READ|PROT_WRITE, MAP_PRIVATE, featfd, 0);
+		fc = (char *)mmap(NULL, fs.st_size, PROT_READ | PROT_WRITE,
+		    ZC_MMAP_FLAGS, featfd, 0);
 		(void) close(featfd);
 
 		/* map ok, and last character == newline? */
-		if (fc < 0 || fc[fs.st_size - 1] != '\n') {
+		if (fc == MAP_FAILED || fc[fs.st_size - 1] != '\n') {
 			(void) munmap((void *) fc, fs.st_size);
 			strlcat(err_badfile, file, ZFS_MAXPROPLEN);
 			strlcat(err_badfile, " ", ZFS_MAXPROPLEN);
@@ -4854,14 +4864,16 @@ zpool_load_compat(const char *compat, boolean_t *features, char *report,
 		for (uint_t i = 0; i < SPA_FEATURES; i++)
 			l_features[i] = B_FALSE;
 
-		/* replace last char with NUL to ensure we have a delimiter */
+		/* replace final newline with NULL to ensure string ends */
 		fc[fs.st_size - 1] = '\0';
 
 		for (line = strtok_r(fc, "\n", &ls);
 		    line != NULL;
 		    line = strtok_r(NULL, "\n", &ls)) {
 			/* discard comments */
-			*(strchrnul(line, '#')) = '\0';
+			char *r = strchr(line, '#');
+			if (r != NULL)
+				*r = '\0';
 
 			for (word = strtok_r(line, ", \t", &ws);
 			    word != NULL;

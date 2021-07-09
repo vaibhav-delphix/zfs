@@ -109,6 +109,7 @@ int zfs_ccw_retry_interval = 300;
 typedef enum zti_modes {
 	ZTI_MODE_FIXED,			/* value is # of threads (min 1) */
 	ZTI_MODE_BATCH,			/* cpu-intensive; value is ignored */
+	ZTI_MODE_SCALE,			/* Taskqs scale with CPUs. */
 	ZTI_MODE_NULL,			/* don't create a taskq */
 	ZTI_NMODES
 } zti_modes_t;
@@ -116,6 +117,7 @@ typedef enum zti_modes {
 #define	ZTI_P(n, q)	{ ZTI_MODE_FIXED, (n), (q) }
 #define	ZTI_PCT(n)	{ ZTI_MODE_ONLINE_PERCENT, (n), 1 }
 #define	ZTI_BATCH	{ ZTI_MODE_BATCH, 0, 1 }
+#define	ZTI_SCALE	{ ZTI_MODE_SCALE, 0, 1 }
 #define	ZTI_NULL	{ ZTI_MODE_NULL, 0, 0 }
 
 #define	ZTI_N(n)	ZTI_P(n, 1)
@@ -142,7 +144,8 @@ static const char *const zio_taskq_types[ZIO_TASKQ_TYPES] = {
  * point of lock contention. The ZTI_P(#, #) macro indicates that we need an
  * additional degree of parallelism specified by the number of threads per-
  * taskq and the number of taskqs; when dispatching an event in this case, the
- * particular taskq is chosen at random.
+ * particular taskq is chosen at random. ZTI_SCALE is similar to ZTI_BATCH,
+ * but with number of taskqs also scaling with number of CPUs.
  *
  * The different taskq priorities are to handle the different contexts (issue
  * and interrupt) and then to reserve threads for ZIO_PRIORITY_NOW I/Os that
@@ -151,9 +154,9 @@ static const char *const zio_taskq_types[ZIO_TASKQ_TYPES] = {
 const zio_taskq_info_t zio_taskqs[ZIO_TYPES][ZIO_TASKQ_TYPES] = {
 	/* ISSUE	ISSUE_HIGH	INTR		INTR_HIGH */
 	{ ZTI_ONE,	ZTI_NULL,	ZTI_ONE,	ZTI_NULL }, /* NULL */
-	{ ZTI_N(8),	ZTI_NULL,	ZTI_P(12, 8),	ZTI_NULL }, /* READ */
-	{ ZTI_BATCH,	ZTI_N(5),	ZTI_P(12, 8),	ZTI_N(5) }, /* WRITE */
-	{ ZTI_P(12, 8),	ZTI_NULL,	ZTI_ONE,	ZTI_NULL }, /* FREE */
+	{ ZTI_N(8),	ZTI_NULL,	ZTI_SCALE,	ZTI_NULL }, /* READ */
+	{ ZTI_BATCH,	ZTI_N(5),	ZTI_SCALE,	ZTI_N(5) }, /* WRITE */
+	{ ZTI_SCALE,	ZTI_NULL,	ZTI_ONE,	ZTI_NULL }, /* FREE */
 	{ ZTI_ONE,	ZTI_NULL,	ZTI_ONE,	ZTI_NULL }, /* CLAIM */
 	{ ZTI_ONE,	ZTI_NULL,	ZTI_ONE,	ZTI_NULL }, /* IOCTL */
 	{ ZTI_N(4),	ZTI_NULL,	ZTI_ONE,	ZTI_NULL }, /* TRIM */
@@ -165,7 +168,8 @@ static boolean_t spa_has_active_shared_spare(spa_t *spa);
 static int spa_load_impl(spa_t *spa, spa_import_type_t type, char **ereport);
 static void spa_vdev_resilver_done(spa_t *spa);
 
-uint_t		zio_taskq_batch_pct = 75;	/* 1 thread per cpu in pset */
+uint_t		zio_taskq_batch_pct = 80;	/* 1 thread per cpu in pset */
+uint_t		zio_taskq_batch_tpq;		/* threads per taskq */
 boolean_t	zio_taskq_sysdc = B_TRUE;	/* use SDC scheduling class */
 uint_t		zio_taskq_basedc = 80;		/* base duty cycle */
 
@@ -962,25 +966,12 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 	uint_t value = ztip->zti_value;
 	uint_t count = ztip->zti_count;
 	spa_taskqs_t *tqs = &spa->spa_zio_taskq[t][q];
-	uint_t flags = 0;
+	uint_t cpus, flags = TASKQ_DYNAMIC;
 	boolean_t batch = B_FALSE;
-
-	if (mode == ZTI_MODE_NULL) {
-		tqs->stqs_count = 0;
-		tqs->stqs_taskq = NULL;
-		return;
-	}
-
-	ASSERT3U(count, >, 0);
-
-	tqs->stqs_count = count;
-	tqs->stqs_taskq = kmem_alloc(count * sizeof (taskq_t *), KM_SLEEP);
 
 	switch (mode) {
 	case ZTI_MODE_FIXED:
-		ASSERT3U(value, >=, 1);
-		value = MAX(value, 1);
-		flags |= TASKQ_DYNAMIC;
+		ASSERT3U(value, >, 0);
 		break;
 
 	case ZTI_MODE_BATCH:
@@ -989,6 +980,48 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 		value = MIN(zio_taskq_batch_pct, 100);
 		break;
 
+	case ZTI_MODE_SCALE:
+		flags |= TASKQ_THREADS_CPU_PCT;
+		/*
+		 * We want more taskqs to reduce lock contention, but we want
+		 * less for better request ordering and CPU utilization.
+		 */
+		cpus = MAX(1, boot_ncpus * zio_taskq_batch_pct / 100);
+		if (zio_taskq_batch_tpq > 0) {
+			count = MAX(1, (cpus + zio_taskq_batch_tpq / 2) /
+			    zio_taskq_batch_tpq);
+		} else {
+			/*
+			 * Prefer 6 threads per taskq, but no more taskqs
+			 * than threads in them on large systems. For 80%:
+			 *
+			 *                 taskq   taskq   total
+			 * cpus    taskqs  percent threads threads
+			 * ------- ------- ------- ------- -------
+			 * 1       1       80%     1       1
+			 * 2       1       80%     1       1
+			 * 4       1       80%     3       3
+			 * 8       2       40%     3       6
+			 * 16      3       27%     4       12
+			 * 32      5       16%     5       25
+			 * 64      7       11%     7       49
+			 * 128     10      8%      10      100
+			 * 256     14      6%      15      210
+			 */
+			count = 1 + cpus / 6;
+			while (count * count > cpus)
+				count--;
+		}
+		/* Limit each taskq within 100% to not trigger assertion. */
+		count = MAX(count, (zio_taskq_batch_pct + 99) / 100);
+		value = (zio_taskq_batch_pct + count / 2) / count;
+		break;
+
+	case ZTI_MODE_NULL:
+		tqs->stqs_count = 0;
+		tqs->stqs_taskq = NULL;
+		return;
+
 	default:
 		panic("unrecognized mode for %s_%s taskq (%u:%u) in "
 		    "spa_activate()",
@@ -996,12 +1029,20 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 		break;
 	}
 
+	ASSERT3U(count, >, 0);
+	tqs->stqs_count = count;
+	tqs->stqs_taskq = kmem_alloc(count * sizeof (taskq_t *), KM_SLEEP);
+
 	for (uint_t i = 0; i < count; i++) {
 		taskq_t *tq;
 		char name[32];
 
-		(void) snprintf(name, sizeof (name), "%s_%s",
-		    zio_type_name[t], zio_taskq_types[q]);
+		if (count > 1)
+			(void) snprintf(name, sizeof (name), "%s_%s_%u",
+			    zio_type_name[t], zio_taskq_types[q], i);
+		else
+			(void) snprintf(name, sizeof (name), "%s_%s",
+			    zio_type_name[t], zio_taskq_types[q]);
 
 		if (zio_taskq_sysdc && spa->spa_proc != &p0) {
 			if (batch)
@@ -2542,8 +2583,9 @@ spa_livelist_delete_cb(void *arg, zthr_t *z)
 			    .to_free = &to_free
 			};
 			zfs_dbgmsg("deleting sublist (id %llu) from"
-			    " livelist %llu, %d remaining",
-			    dle->dle_bpobj.bpo_object, ll_obj, count - 1);
+			    " livelist %llu, %lld remaining",
+			    (u_longlong_t)dle->dle_bpobj.bpo_object,
+			    (u_longlong_t)ll_obj, (longlong_t)count - 1);
 			VERIFY0(dsl_sync_task(spa_name(spa), NULL,
 			    sublist_delete_sync, &sync_arg, 0,
 			    ZFS_SPACE_CHECK_DESTROY));
@@ -2560,7 +2602,8 @@ spa_livelist_delete_cb(void *arg, zthr_t *z)
 		    .ll_obj = ll_obj,
 		    .zap_obj = zap_obj
 		};
-		zfs_dbgmsg("deletion of livelist %llu completed", ll_obj);
+		zfs_dbgmsg("deletion of livelist %llu completed",
+		    (u_longlong_t)ll_obj);
 		VERIFY0(dsl_sync_task(spa_name(spa), NULL, livelist_delete_sync,
 		    &sync_arg, 0, ZFS_SPACE_CHECK_DESTROY));
 	}
@@ -2660,10 +2703,12 @@ spa_livelist_condense_sync(void *arg, dmu_tx_t *tx)
 	dsl_dataset_name(ds, dsname);
 	zfs_dbgmsg("txg %llu condensing livelist of %s (id %llu), bpobj %llu "
 	    "(%llu blkptrs) and bpobj %llu (%llu blkptrs) -> bpobj %llu "
-	    "(%llu blkptrs)", tx->tx_txg, dsname, ds->ds_object, first_obj,
-	    cur_first_size, next_obj, cur_next_size,
-	    first->dle_bpobj.bpo_object,
-	    first->dle_bpobj.bpo_phys->bpo_num_blkptrs);
+	    "(%llu blkptrs)", (u_longlong_t)tx->tx_txg, dsname,
+	    (u_longlong_t)ds->ds_object, (u_longlong_t)first_obj,
+	    (u_longlong_t)cur_first_size, (u_longlong_t)next_obj,
+	    (u_longlong_t)cur_next_size,
+	    (u_longlong_t)first->dle_bpobj.bpo_object,
+	    (u_longlong_t)first->dle_bpobj.bpo_phys->bpo_num_blkptrs);
 out:
 	dmu_buf_rele(ds->ds_dbuf, spa);
 	spa->spa_to_condense.ds = NULL;
@@ -3055,8 +3100,10 @@ spa_activity_check_duration(spa_t *spa, uberblock_t *ub)
 
 		zfs_dbgmsg("fail_intvals>0 import_delay=%llu ub_mmp "
 		    "mmp_fails=%llu ub_mmp mmp_interval=%llu "
-		    "import_intervals=%u", import_delay, MMP_FAIL_INT(ub),
-		    MMP_INTERVAL(ub), import_intervals);
+		    "import_intervals=%llu", (u_longlong_t)import_delay,
+		    (u_longlong_t)MMP_FAIL_INT(ub),
+		    (u_longlong_t)MMP_INTERVAL(ub),
+		    (u_longlong_t)import_intervals);
 
 	} else if (MMP_INTERVAL_VALID(ub) && MMP_FAIL_INT_VALID(ub) &&
 	    MMP_FAIL_INT(ub) == 0) {
@@ -3067,8 +3114,10 @@ spa_activity_check_duration(spa_t *spa, uberblock_t *ub)
 
 		zfs_dbgmsg("fail_intvals=0 import_delay=%llu ub_mmp "
 		    "mmp_interval=%llu ub_mmp_delay=%llu "
-		    "import_intervals=%u", import_delay, MMP_INTERVAL(ub),
-		    ub->ub_mmp_delay, import_intervals);
+		    "import_intervals=%llu", (u_longlong_t)import_delay,
+		    (u_longlong_t)MMP_INTERVAL(ub),
+		    (u_longlong_t)ub->ub_mmp_delay,
+		    (u_longlong_t)import_intervals);
 
 	} else if (MMP_VALID(ub)) {
 		/*
@@ -3079,15 +3128,18 @@ spa_activity_check_duration(spa_t *spa, uberblock_t *ub)
 		    ub->ub_mmp_delay) * import_intervals);
 
 		zfs_dbgmsg("import_delay=%llu ub_mmp_delay=%llu "
-		    "import_intervals=%u leaves=%u", import_delay,
-		    ub->ub_mmp_delay, import_intervals,
+		    "import_intervals=%llu leaves=%u",
+		    (u_longlong_t)import_delay,
+		    (u_longlong_t)ub->ub_mmp_delay,
+		    (u_longlong_t)import_intervals,
 		    vdev_count_leaves(spa));
 	} else {
 		/* Using local tunings is the only reasonable option */
 		zfs_dbgmsg("pool last imported on non-MMP aware "
 		    "host using import_delay=%llu multihost_interval=%llu "
-		    "import_intervals=%u", import_delay, multihost_interval,
-		    import_intervals);
+		    "import_intervals=%llu", (u_longlong_t)import_delay,
+		    (u_longlong_t)multihost_interval,
+		    (u_longlong_t)import_intervals);
 	}
 
 	return (import_delay);
@@ -3139,7 +3191,7 @@ spa_activity_check(spa_t *spa, uberblock_t *ub, nvlist_t *config)
 	import_delay = spa_activity_check_duration(spa, ub);
 
 	/* Add a small random factor in case of simultaneous imports (0-25%) */
-	import_delay += import_delay * spa_get_random(250) / 1000;
+	import_delay += import_delay * random_in_range(250) / 1000;
 
 	import_expire = gethrtime() + import_delay;
 
@@ -3155,8 +3207,11 @@ spa_activity_check(spa_t *spa, uberblock_t *ub, nvlist_t *config)
 			    "txg %llu ub_txg  %llu "
 			    "timestamp %llu ub_timestamp  %llu "
 			    "mmp_config %#llx ub_mmp_config %#llx",
-			    txg, ub->ub_txg, timestamp, ub->ub_timestamp,
-			    mmp_config, ub->ub_mmp_config);
+			    (u_longlong_t)txg, (u_longlong_t)ub->ub_txg,
+			    (u_longlong_t)timestamp,
+			    (u_longlong_t)ub->ub_timestamp,
+			    (u_longlong_t)mmp_config,
+			    (u_longlong_t)ub->ub_mmp_config);
 
 			error = SET_ERROR(EREMOTEIO);
 			break;
@@ -4645,7 +4700,7 @@ spa_ld_checkpoint_rewind(spa_t *spa)
 		vdev_t *svd[SPA_SYNC_MIN_VDEVS] = { NULL };
 		int svdcount = 0;
 		int children = rvd->vdev_children;
-		int c0 = spa_get_random(children);
+		int c0 = random_in_range(children);
 
 		for (int c = 0; c < children; c++) {
 			vdev_t *vd = rvd->vdev_child[(c0 + c) % children];
@@ -8742,12 +8797,16 @@ spa_sync_props(void *arg, dmu_tx_t *tx)
 			spa->spa_comment = spa_strdup(strval);
 			/*
 			 * We need to dirty the configuration on all the vdevs
-			 * so that their labels get updated.  It's unnecessary
-			 * to do this for pool creation since the vdev's
-			 * configuration has already been dirtied.
+			 * so that their labels get updated.  We also need to
+			 * update the cache file to keep it in sync with the
+			 * MOS version. It's unnecessary to do this for pool
+			 * creation since the vdev's configuration has already
+			 * been dirtied.
 			 */
-			if (tx->tx_txg != TXG_INITIAL)
+			if (tx->tx_txg != TXG_INITIAL) {
 				vdev_config_dirty(spa->spa_root_vdev);
+				spa_async_request(spa, SPA_ASYNC_CONFIG_UPDATE);
+			}
 			spa_history_log_internal(spa, "set", tx,
 			    "%s=%s", nvpair_name(elem), strval);
 			break;
@@ -8759,8 +8818,11 @@ spa_sync_props(void *arg, dmu_tx_t *tx)
 			/*
 			 * Dirty the configuration on vdevs as above.
 			 */
-			if (tx->tx_txg != TXG_INITIAL)
+			if (tx->tx_txg != TXG_INITIAL) {
 				vdev_config_dirty(spa->spa_root_vdev);
+				spa_async_request(spa, SPA_ASYNC_CONFIG_UPDATE);
+			}
+
 			spa_history_log_internal(spa, "set", tx,
 			    "%s=%s", nvpair_name(elem), strval);
 			break;
@@ -9191,7 +9253,7 @@ spa_sync_rewrite_vdev_config(spa_t *spa, dmu_tx_t *tx)
 			vdev_t *svd[SPA_SYNC_MIN_VDEVS] = { NULL };
 			int svdcount = 0;
 			int children = rvd->vdev_children;
-			int c0 = spa_get_random(children);
+			int c0 = random_in_range(children);
 
 			for (int c = 0; c < children; c++) {
 				vdev_t *vd =
@@ -9987,6 +10049,9 @@ ZFS_MODULE_PARAM(zfs_spa, spa_, load_print_vdev_tree, INT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_batch_pct, UINT, ZMOD_RD,
 	"Percentage of CPUs to run an IO worker thread");
+
+ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_batch_tpq, UINT, ZMOD_RD,
+	"Number of threads per IO worker taskqueue");
 
 ZFS_MODULE_PARAM(zfs, zfs_, max_missing_tvds, ULONG, ZMOD_RW,
 	"Allow importing pool with up to this number of missing top-level "

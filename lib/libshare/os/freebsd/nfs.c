@@ -42,7 +42,7 @@ __FBSDID("$FreeBSD$");
 #include <unistd.h>
 #include <libintl.h>
 
-#include "libzfs_impl.h"
+#include <libshare.h>
 #include "libshare_impl.h"
 #include "nfs.h"
 
@@ -147,7 +147,7 @@ translate_opts(const char *shareopts)
  * This function copies all entries from the exports file to "filename",
  * omitting any entries for the specified mountpoint.
  */
-__attribute__((visibility("hidden"))) int
+int
 nfs_copy_entries(char *filename, const char *mountpoint)
 {
 	int error = SA_OK;

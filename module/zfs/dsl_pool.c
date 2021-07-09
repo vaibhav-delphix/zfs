@@ -569,8 +569,7 @@ dsl_pool_sync_mos(dsl_pool_t *dp, dmu_tx_t *tx)
 	VERIFY0(zio_wait(zio));
 	dmu_objset_sync_done(dp->dp_meta_objset, tx);
 	taskq_wait(dp->dp_sync_taskq);
-	multilist_destroy(dp->dp_meta_objset->os_synced_dnodes);
-	dp->dp_meta_objset->os_synced_dnodes = NULL;
+	multilist_destroy(&dp->dp_meta_objset->os_synced_dnodes);
 
 	dprintf_bp(&dp->dp_meta_rootbp, "meta objset rootbp is %s", "");
 	spa_set_rootblkptr(dp->dp_spa, &dp->dp_meta_rootbp);
@@ -900,16 +899,24 @@ dsl_pool_need_dirty_delay(dsl_pool_t *dp)
 {
 	uint64_t delay_min_bytes =
 	    zfs_dirty_data_max * zfs_delay_min_dirty_percent / 100;
-	uint64_t dirty_min_bytes =
-	    zfs_dirty_data_max * zfs_dirty_data_sync_percent / 100;
-	uint64_t dirty;
 
 	mutex_enter(&dp->dp_lock);
-	dirty = dp->dp_dirty_total;
+	uint64_t dirty = dp->dp_dirty_total;
 	mutex_exit(&dp->dp_lock);
-	if (dirty > dirty_min_bytes)
-		txg_kick(dp);
+
 	return (dirty > delay_min_bytes);
+}
+
+static boolean_t
+dsl_pool_need_dirty_sync(dsl_pool_t *dp, uint64_t txg)
+{
+	ASSERT(MUTEX_HELD(&dp->dp_lock));
+
+	uint64_t dirty_min_bytes =
+	    zfs_dirty_data_max * zfs_dirty_data_sync_percent / 100;
+	uint64_t dirty = dp->dp_dirty_pertxg[txg & TXG_MASK];
+
+	return (dirty > dirty_min_bytes);
 }
 
 void
@@ -919,7 +926,12 @@ dsl_pool_dirty_space(dsl_pool_t *dp, int64_t space, dmu_tx_t *tx)
 		mutex_enter(&dp->dp_lock);
 		dp->dp_dirty_pertxg[tx->tx_txg & TXG_MASK] += space;
 		dsl_pool_dirty_delta(dp, space);
+		boolean_t needsync = !dmu_tx_is_syncing(tx) &&
+		    dsl_pool_need_dirty_sync(dp, tx->tx_txg);
 		mutex_exit(&dp->dp_lock);
+
+		if (needsync)
+			txg_kick(dp, tx->tx_txg);
 	}
 }
 

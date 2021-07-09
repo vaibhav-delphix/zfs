@@ -32,6 +32,7 @@
  * Copyright (c) 2017, Intel Corporation.
  * Copyright (c) 2019, loli10K <ezomori.nozomu@gmail.com>
  * Copyright (c) 2021, Colm Buckley <colm@tuatha.org>
+ * Copyright [2021] Hewlett Packard Enterprise Development LP
  */
 
 #include <assert.h>
@@ -532,7 +533,7 @@ usage(boolean_t requested)
 		(void) fprintf(fp, "YES   disabled | enabled | active\n");
 
 		(void) fprintf(fp, gettext("\nThe feature@ properties must be "
-		    "appended with a feature name.\nSee zpool-features(5).\n"));
+		    "appended with a feature name.\nSee zpool-features(7).\n"));
 	}
 
 	/*
@@ -2397,6 +2398,10 @@ print_status_config(zpool_handle_t *zhp, status_cbdata_t *cb, const char *name,
 			(void) printf(gettext("all children offline"));
 			break;
 
+		case VDEV_AUX_BAD_LABEL:
+			(void) printf(gettext("invalid label"));
+			break;
+
 		default:
 			(void) printf(gettext("corrupted data"));
 			break;
@@ -2537,6 +2542,10 @@ print_import_config(status_cbdata_t *cb, const char *name, nvlist_t *nv,
 
 		case VDEV_AUX_CHILDREN_OFFLINE:
 			(void) printf(gettext("all children offline"));
+			break;
+
+		case VDEV_AUX_BAD_LABEL:
+			(void) printf(gettext("invalid label"));
 			break;
 
 		default:
@@ -3507,16 +3516,8 @@ zpool_do_import(int argc, char **argv)
 			cachefile = optarg;
 			break;
 		case 'd':
-			if (searchdirs == NULL) {
-				searchdirs = safe_malloc(sizeof (char *));
-			} else {
-				char **tmp = safe_malloc((nsearch + 1) *
-				    sizeof (char *));
-				bcopy(searchdirs, tmp, nsearch *
-				    sizeof (char *));
-				free(searchdirs);
-				searchdirs = tmp;
-			}
+			searchdirs = safe_realloc(searchdirs,
+			    (nsearch + 1) * sizeof (char *));
 			searchdirs[nsearch++] = optarg;
 			break;
 		case 'D':
@@ -3706,24 +3707,16 @@ zpool_do_import(int argc, char **argv)
 	 * Check the environment for the preferred search path.
 	 */
 	if ((searchdirs == NULL) && (env = getenv("ZPOOL_IMPORT_PATH"))) {
-		char *dir;
+		char *dir, *tmp = NULL;
 
 		envdup = strdup(env);
 
-		dir = strtok(envdup, ":");
-		while (dir != NULL) {
-			if (searchdirs == NULL) {
-				searchdirs = safe_malloc(sizeof (char *));
-			} else {
-				char **tmp = safe_malloc((nsearch + 1) *
-				    sizeof (char *));
-				bcopy(searchdirs, tmp, nsearch *
-				    sizeof (char *));
-				free(searchdirs);
-				searchdirs = tmp;
-			}
+		for (dir = strtok_r(envdup, ":", &tmp);
+		    dir != NULL;
+		    dir = strtok_r(NULL, ":", &tmp)) {
+			searchdirs = safe_realloc(searchdirs,
+			    (nsearch + 1) * sizeof (char *));
 			searchdirs[nsearch++] = dir;
-			dir = strtok(NULL, ":");
 		}
 	}
 
@@ -3765,10 +3758,8 @@ zpool_do_import(int argc, char **argv)
 	}
 
 	if (err == 1) {
-		if (searchdirs != NULL)
-			free(searchdirs);
-		if (envdup != NULL)
-			free(envdup);
+		free(searchdirs);
+		free(envdup);
 		nvlist_free(policy);
 		nvlist_free(pools);
 		nvlist_free(props);
@@ -3806,10 +3797,8 @@ error:
 	nvlist_free(props);
 	nvlist_free(pools);
 	nvlist_free(policy);
-	if (searchdirs != NULL)
-		free(searchdirs);
-	if (envdup != NULL)
-		free(envdup);
+	free(searchdirs);
+	free(envdup);
 
 	return (err ? 1 : 0);
 }
@@ -5400,7 +5389,7 @@ print_zpool_dir_scripts(char *dirpath)
 static void
 print_zpool_script_list(char *subcommand)
 {
-	char *dir, *sp;
+	char *dir, *sp, *tmp;
 
 	printf(gettext("Available 'zpool %s -c' commands:\n"), subcommand);
 
@@ -5408,11 +5397,10 @@ print_zpool_script_list(char *subcommand)
 	if (sp == NULL)
 		return;
 
-	dir = strtok(sp, ":");
-	while (dir != NULL) {
+	for (dir = strtok_r(sp, ":", &tmp);
+	    dir != NULL;
+	    dir = strtok_r(NULL, ":", &tmp))
 		print_zpool_dir_scripts(dir);
-		dir = strtok(NULL, ":");
-	}
 
 	free(sp);
 }
@@ -8280,7 +8268,7 @@ status_callback(zpool_handle_t *zhp, void *data)
 		printf_color(ANSI_YELLOW, gettext("Enable all features using "
 		    "'zpool upgrade'. Once this is done,\n\tthe pool may no "
 		    "longer be accessible by software that does not support\n\t"
-		    "the features. See zpool-features(5) for details.\n"));
+		    "the features. See zpool-features(7) for details.\n"));
 		break;
 
 	case ZPOOL_STATUS_COMPATIBILITY_ERR:
@@ -8869,7 +8857,7 @@ upgrade_cb(zpool_handle_t *zhp, void *arg)
 	upgrade_cbdata_t *cbp = arg;
 	nvlist_t *config;
 	uint64_t version;
-	boolean_t printnl = B_FALSE;
+	boolean_t modified_pool = B_FALSE;
 	int ret;
 
 	config = zpool_get_config(zhp, NULL);
@@ -8883,7 +8871,7 @@ upgrade_cb(zpool_handle_t *zhp, void *arg)
 		ret = upgrade_version(zhp, cbp->cb_version);
 		if (ret != 0)
 			return (ret);
-		printnl = B_TRUE;
+		modified_pool = B_TRUE;
 
 		/*
 		 * If they did "zpool upgrade -a", then we could
@@ -8903,12 +8891,13 @@ upgrade_cb(zpool_handle_t *zhp, void *arg)
 
 		if (count > 0) {
 			cbp->cb_first = B_FALSE;
-			printnl = B_TRUE;
+			modified_pool = B_TRUE;
 		}
 	}
 
-	if (printnl) {
-		(void) printf(gettext("\n"));
+	if (modified_pool) {
+		(void) printf("\n");
+		(void) after_zpool_upgrade(zhp);
 	}
 
 	return (0);
@@ -8982,7 +8971,7 @@ upgrade_list_disabled_cb(zpool_handle_t *zhp, void *arg)
 					    "pool may become incompatible with "
 					    "software\nthat does not support "
 					    "the feature. See "
-					    "zpool-features(5) for "
+					    "zpool-features(7) for "
 					    "details.\n\n"
 					    "Note that the pool "
 					    "'compatibility' feature can be "
@@ -9021,7 +9010,7 @@ upgrade_list_disabled_cb(zpool_handle_t *zhp, void *arg)
 static int
 upgrade_one(zpool_handle_t *zhp, void *data)
 {
-	boolean_t printnl = B_FALSE;
+	boolean_t modified_pool = B_FALSE;
 	upgrade_cbdata_t *cbp = data;
 	uint64_t cur_version;
 	int ret;
@@ -9049,7 +9038,7 @@ upgrade_one(zpool_handle_t *zhp, void *data)
 	}
 
 	if (cur_version != cbp->cb_version) {
-		printnl = B_TRUE;
+		modified_pool = B_TRUE;
 		ret = upgrade_version(zhp, cbp->cb_version);
 		if (ret != 0)
 			return (ret);
@@ -9062,7 +9051,7 @@ upgrade_one(zpool_handle_t *zhp, void *data)
 			return (ret);
 
 		if (count != 0) {
-			printnl = B_TRUE;
+			modified_pool = B_TRUE;
 		} else if (cur_version == SPA_VERSION) {
 			(void) printf(gettext("Pool '%s' already has all "
 			    "supported and requested features enabled.\n"),
@@ -9070,8 +9059,9 @@ upgrade_one(zpool_handle_t *zhp, void *data)
 		}
 	}
 
-	if (printnl) {
-		(void) printf(gettext("\n"));
+	if (modified_pool) {
+		(void) printf("\n");
+		(void) after_zpool_upgrade(zhp);
 	}
 
 	return (0);
