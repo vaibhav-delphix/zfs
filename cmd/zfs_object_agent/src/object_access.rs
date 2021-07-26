@@ -213,7 +213,13 @@ impl ObjectAccess {
         }
     }
 
-    pub fn new(endpoint: &str, region_str: &str, bucket: &str, profile: Option<String>, readonly: bool) -> Self {
+    pub fn new(
+        endpoint: &str,
+        region_str: &str,
+        bucket: &str,
+        profile: Option<String>,
+        readonly: bool,
+    ) -> Self {
         let client = ObjectAccess::get_client(endpoint, region_str, profile);
 
         ObjectAccess {

@@ -275,11 +275,7 @@ impl Server {
             .ok()
             .map(|s| s.to_str().unwrap().to_owned());
 
-        let mut client = ObjectAccess::get_client(
-            endpoint,
-            region,
-            credentials_profile,
-        );
+        let mut client = ObjectAccess::get_client(endpoint, region, credentials_profile);
         let mut resp = NvList::new_unique_names();
         let mut buckets = vec![];
         if let Ok(bucket) = nvl.lookup_string("bucket") {

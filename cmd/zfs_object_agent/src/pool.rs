@@ -81,10 +81,7 @@ impl PoolOwnerPhys {
         &self,
         object_access: &ObjectAccess,
         timeout: Option<Duration>,
-    ) -> Result<
-        rusoto_s3::PutObjectOutput,
-        OAError<rusoto_s3::PutObjectError>,
-    > {
+    ) -> Result<rusoto_s3::PutObjectOutput, OAError<rusoto_s3::PutObjectError>> {
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access
