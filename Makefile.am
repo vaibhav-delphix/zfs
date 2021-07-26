@@ -103,7 +103,7 @@ endif
 endif
 
 PHONY += codecheck
-codecheck: cstyle shellcheck checkbashisms flake8 mancheck testscheck vcscheck
+codecheck: cstyle shellcheck checkbashisms flake8 mancheck testscheck vcscheck rustfmt
 
 PHONY += checkstyle
 checkstyle: codecheck commitcheck
@@ -122,6 +122,18 @@ cstyle:
 		! -name 'opt_global.h' ! -name '*_if*.h' \
 		! -path './module/zstd/lib/*' \
 		-exec ${top_srcdir}/scripts/cstyle.pl -cpP {} \+
+
+RUSTFMTDIRS = cmd/zfs_object_agent
+PHONY += rustfmt
+rustfmt: $(RUSTFMTDIRS)
+	@if type cargo-fmt > /dev/null 2>&1; then \
+		set -e ; \
+		for dir in $(RUSTFMTDIRS) ; do \
+			cargo-fmt --manifest-path $$dir/Cargo.toml -- --check ; \
+		done \
+	else \
+		echo "skipping rustfmt because cargo-fmt is not installed"; \
+	fi
 
 filter_executable = -exec test -x '{}' \; -print
 
