@@ -6482,8 +6482,16 @@ spa_export_common(const char *pool, int new_state, nvlist_t **oldconfig,
 		if (new_state != POOL_STATE_UNINITIALIZED && !hardforce) {
 			spa_config_enter(spa, SCL_ALL, FTAG, RW_WRITER);
 			spa->spa_state = new_state;
+			/*
+			 * XXX There's no mechanical backing for the
+			 * final_txg, it's just an estimate of about how many
+			 * TXGs we need. Changes to the export process can
+			 * cause this to suddenly start failing for no obvious
+			 * reason. We should improve this system to be more
+			 * predictable and understandable.
+			 */
 			spa->spa_final_txg = spa_last_synced_txg(spa) +
-			    TXG_DEFER_SIZE + 1;
+			    TXG_DEFER_SIZE + 3;
 			vdev_config_dirty(spa->spa_root_vdev);
 			spa_config_exit(spa, SCL_ALL, FTAG);
 		}
