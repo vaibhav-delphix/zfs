@@ -103,7 +103,8 @@ endif
 endif
 
 PHONY += codecheck
-codecheck: cstyle shellcheck checkbashisms flake8 mancheck testscheck vcscheck rustfmt
+codecheck: cstyle shellcheck checkbashisms flake8 mancheck testscheck vcscheck \
+	rustfmt rustclippy
 
 PHONY += checkstyle
 checkstyle: codecheck commitcheck
@@ -123,16 +124,28 @@ cstyle:
 		! -path './module/zstd/lib/*' \
 		-exec ${top_srcdir}/scripts/cstyle.pl -cpP {} \+
 
-RUSTFMTDIRS = cmd/zfs_object_agent
+RUSTDIRS = cmd/zfs_object_agent
+
 PHONY += rustfmt
-rustfmt: $(RUSTFMTDIRS)
+rustfmt: $(RUSTDIRS)
 	@if type cargo-fmt > /dev/null 2>&1; then \
 		set -e ; \
-		for dir in $(RUSTFMTDIRS) ; do \
+		for dir in $(RUSTDIRS) ; do \
 			cargo-fmt --manifest-path $$dir/Cargo.toml -- --check ; \
 		done \
 	else \
 		echo "skipping rustfmt because cargo-fmt is not installed"; \
+	fi
+
+PHONY += rustclippy
+rustclippy: $(RUSTDIRS)
+	@if type cargo-clippy > /dev/null 2>&1; then \
+		set -e ; \
+		for dir in $(RUSTDIRS) ; do \
+			cargo clippy --manifest-path $$dir/Cargo.toml -- -Dwarnings ; \
+		done \
+	else \
+		echo "skipping rustclippy because cargo-clippy is not installed"; \
 	fi
 
 filter_executable = -exec test -x '{}' \; -print
