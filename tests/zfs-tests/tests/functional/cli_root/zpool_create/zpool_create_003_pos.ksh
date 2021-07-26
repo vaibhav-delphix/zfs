@@ -67,7 +67,7 @@ do
 	#
 	# Make sure disk is clean before we use it
 	#
-	create_pool $TESTPOOL $DISK0 > $tmpfile
+	create_pool -p $TESTPOOL -d "$DISK0" > $tmpfile
 	destroy_pool $TESTPOOL
 
 	log_must eval "zpool create -n $prop $TESTPOOL $DISK0 > $tmpfile"
@@ -86,7 +86,7 @@ do
 	#
 	# Make sure disk is clean before we use it
 	#
-	create_pool $TESTPOOL $DISK0 > $tmpfile
+	create_pool -p $TESTPOOL -d "$DISK0" > $tmpfile
 	destroy_pool $TESTPOOL
 
 	log_mustnot zpool create -n $prop $TESTPOOL $DISK0

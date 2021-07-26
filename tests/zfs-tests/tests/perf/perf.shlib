@@ -305,7 +305,7 @@ function recreate_perf_pool
 	# This function handles the case where the pool already exists,
 	# and will destroy the previous pool and recreate a new pool.
 	#
-	create_pool $PERFPOOL $DISKS
+	create_pool -p $PERFPOOL -d "$DISKS"
 }
 
 function verify_threads_per_fs
