@@ -1333,18 +1333,18 @@ impl Pool {
         }
     }
 
-    async fn unclaim(&self) {
-        PoolOwnerPhys::delete(
-            &self.state.shared_state.object_access,
-            self.state.shared_state.guid,
-        )
-        .await;
+    async fn unclaim(self) {
+        if !self.state.shared_state.object_access.readonly() {
+            PoolOwnerPhys::delete(
+                &self.state.shared_state.object_access,
+                self.state.shared_state.guid,
+            )
+            .await;
+        }
     }
 
-    pub async fn close(&self) {
-        if !self.state.shared_state.object_access.readonly() {
-            self.unclaim().await;
-        }
+    pub async fn close(self) {
+        self.unclaim().await;
     }
 }
 

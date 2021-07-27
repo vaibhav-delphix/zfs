@@ -117,10 +117,16 @@ commitcheck:
 
 PHONY += cstyle
 cstyle:
-	@find ${top_srcdir} -name build -prune \
-		-o -type f -name '*.[hc]' \
-		! -name 'zfs_config.*' ! -name '*.mod.c' \
-		! -name 'opt_global.h' ! -name '*_if*.h' \
+	@find ${top_srcdir} \
+		-name build \
+		-prune \
+		-o -type f \
+		-name '*.[hc]' \
+		! -name 'zfs_config.*' \
+		! -name '*.mod.c' \
+		! -name 'opt_global.h' \
+		! -name '*_if*.h' \
+		! -name 'libzoa.h' \
 		! -path './module/zstd/lib/*' \
 		-exec ${top_srcdir}/scripts/cstyle.pl -cpP {} \+
 
@@ -142,7 +148,7 @@ rustclippy: $(RUSTDIRS)
 	@if type cargo-clippy > /dev/null 2>&1; then \
 		set -e ; \
 		for dir in $(RUSTDIRS) ; do \
-			cargo clippy --manifest-path $$dir/Cargo.toml -- -Dwarnings ; \
+			cargo clippy --workspace --manifest-path $$dir/Cargo.toml -- -Dwarnings ; \
 		done \
 	else \
 		echo "skipping rustclippy because cargo-clippy is not installed"; \

@@ -446,11 +446,20 @@ object_store_restart_agent(vdev_t *vd)
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
+	/*
+	 * XXX This doesn't actually exit the agent, it just tells the agent to
+	 * close the connection.  We could just as easily close the connection
+	 * ourself.  Or change the agent code to actually exit.
+	 */
 	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_EXIT);
 	agent_request(vos, nv, FTAG);
 	fnvlist_free(nv);
 }
 
+/*
+ * XXX This doesn't actually stop the agent, it just tells the agent to close
+ * the pool (practically, to mark the pool as no longer owned by this agent).
+ */
 static void
 object_store_stop_agent(vdev_t *vd)
 {

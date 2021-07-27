@@ -13,3 +13,4 @@ fern = "0.6"
 zoa_common = { path = "../" }
 log = "0.4"
 tokio = { version = "1.4", features = ["full"] }
+uuid = {version = "0.8.2", features = ["v4", "serde"]}
