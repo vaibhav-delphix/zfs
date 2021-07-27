@@ -162,15 +162,14 @@ pub struct AtimeHistogramPhys {
 
 impl AtimeHistogramPhys {
     pub fn new(start: Atime) -> AtimeHistogramPhys {
-        let this = AtimeHistogramPhys {
+        AtimeHistogramPhys {
             histogram: Default::default(),
             start,
-        };
-        return this;
+        }
     }
 
     pub fn get_start(&mut self) -> Atime {
-        return self.start;
+        self.start
     }
 
     pub fn atime_for_target_size(&mut self, target_size: u64) -> Atime {
@@ -190,7 +189,7 @@ impl AtimeHistogramPhys {
             trace!("including {} in target at bucket {}", count, index);
             remaining -= count;
         }
-        return Atime(target_index);
+        Atime(target_index)
     }
 
     pub fn insert(&mut self, value: IndexValue) {

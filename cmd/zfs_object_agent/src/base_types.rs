@@ -114,6 +114,6 @@ impl Atime {
 impl Sub<Atime> for Atime {
     type Output = usize;
     fn sub(self, rhs: Atime) -> usize {
-        return self.0 as usize - rhs.0 as usize;
+        self.0 as usize - rhs.0 as usize
     }
 }

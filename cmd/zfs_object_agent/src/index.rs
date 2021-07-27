@@ -71,7 +71,7 @@ impl ZettaCacheIndex {
     }
 
     pub fn get_histogram_start(&mut self) -> Atime {
-        return self.atime_histogram.get_start();
+        self.atime_histogram.get_start()
     }
 
     pub fn append(&mut self, entry: IndexEntry) {

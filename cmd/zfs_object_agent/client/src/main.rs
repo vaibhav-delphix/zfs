@@ -65,7 +65,7 @@ async fn do_s3(bucket: &Bucket) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    return std::result::Result::Ok(());
+    Ok(())
 }
 
 async fn do_rusoto_provider<P>(credentials_provider: P, file: &str)
@@ -113,7 +113,7 @@ async fn do_rusoto_role() -> Result<(), Box<dyn Error>> {
     )
     .await;
 
-    return std::result::Result::Ok(());
+    Ok(())
 }
 
 async fn do_s3_rusoto() -> Result<(), Box<dyn Error>> {
@@ -147,7 +147,7 @@ async fn do_s3_rusoto() -> Result<(), Box<dyn Error>> {
     };
     client.put_object(req).await?;
 
-    return std::result::Result::Ok(());
+    Ok(())
 }
 
 fn do_btree() {

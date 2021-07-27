@@ -1311,7 +1311,7 @@ impl Pool {
                     }),
             );
         }
-        return OwnResult::Success;
+        OwnResult::Success
     }
 
     pub async fn claim(&mut self, id: Uuid) -> Result<(), PoolOpenError> {

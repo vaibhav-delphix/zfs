@@ -345,10 +345,7 @@ impl ObjectAccess {
         delimiter: Option<String>,
     ) -> Vec<ListObjectsV2Output> {
         let full_prefix = prefixed(prefix);
-        let full_start_after = match start_after {
-            Some(sa) => Some(prefixed(&sa)),
-            None => None,
-        };
+        let full_start_after = start_after.map(|sa| prefixed(&sa));
         let mut results = Vec::new();
         let mut continuation_token = None;
         loop {
@@ -467,7 +464,7 @@ impl ObjectAccess {
         .await
     }
 
-    fn invalidate_cache(key: &str, data: &Vec<u8>) {
+    fn invalidate_cache(key: &str, data: &[u8]) {
         let mut c = CACHE.lock().unwrap();
         let mykey = key.to_string();
         if c.cache.contains(&mykey) {
@@ -476,7 +473,7 @@ impl ObjectAccess {
             // freeing (we get/modify/put the object).  Maybe when freeing,
             // the get() should not add to the cache since it's probably
             // just polluting.
-            c.cache.put(mykey, Arc::new(data.clone()));
+            c.cache.put(mykey, Arc::new(data.to_vec()));
         }
     }
 
@@ -538,9 +535,10 @@ impl ObjectAccess {
             }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
-            return true;
+            true
+        } else {
+            false
         }
-        return false;
     }
 
     // XXX just have it take ObjectIdentifiers? but they would need to be
