@@ -2235,18 +2235,18 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.25"
+version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa6f76457f59514c7eeb4e59d891395fab0b2fd1d40723ae737d64153392e9c6"
+checksum = "93119e4feac1cbe6c798c34d3a53ea0026b0b1de6a120deef895137c0529bfe2"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.25"
+version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a36768c0fbf1bb15eca10defa29526bda730a2376c2ab4393ccfa16fb1a318d"
+checksum = "060d69a0afe7796bf42e9e2ff91f5ee691fb15c53d38b4b62a9a53eb23164745"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2681,34 +2681,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4756f7db3f7b5574938c3eb1c117038b8e07f95ee6718c0efad4ac21508f1efd"
 
 [[package]]
-name = "zfs_object_agent"
+name = "zettacache"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-stream",
+ "bincode",
  "chrono",
- "clap",
- "fern",
+ "futures",
+ "futures-core",
+ "libc",
  "log",
+ "lz4",
+ "metered",
+ "more-asserts",
+ "nix",
+ "num",
+ "seahash",
+ "serde",
+ "serde_json",
  "tokio",
- "uuid",
- "zoa_common",
 ]
 
 [[package]]
-name = "zoa"
-version = "0.1.0"
-dependencies = [
- "cbindgen",
- "zoa_common",
-]
-
-[[package]]
-name = "zoa_common"
+name = "zettaobject"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-std",
  "async-stream",
- "async-trait",
  "bincode",
  "bytes",
  "chrono",
@@ -2721,17 +2722,13 @@ dependencies = [
  "libc",
  "log",
  "lru",
- "lz4",
- "metered",
  "more-asserts",
- "nix",
  "num",
  "nvpair",
  "rand",
  "rusoto_core",
  "rusoto_credential",
  "rusoto_s3",
- "seahash",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -2739,6 +2736,26 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "uuid",
+ "zettacache",
+]
+
+[[package]]
+name = "zfs_object_agent"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "log",
+ "zettaobject",
+]
+
+[[package]]
+name = "zoa"
+version = "0.1.0"
+dependencies = [
+ "cbindgen",
+ "zettacache",
+ "zettaobject",
 ]
 
 [[package]]
@@ -2761,5 +2778,6 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "tokio",
- "zoa_common",
+ "zettacache",
+ "zettaobject",
 ]

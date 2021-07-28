@@ -4,7 +4,8 @@ use nvpair::NvListRef;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
-use zoa_common::base_types::*;
+use zettacache::base_types::*;
+use zettaobject::base_types::*;
 
 pub struct Client {
     input: Option<OwnedReadHalf>,

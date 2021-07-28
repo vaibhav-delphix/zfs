@@ -5,7 +5,6 @@ use crate::server::handler_return_ok;
 use crate::server::HandlerReturn;
 use crate::server::SerialHandlerReturn;
 use crate::server::Server;
-use crate::zettacache::ZettaCache;
 use anyhow::anyhow;
 use anyhow::Result;
 use log::*;
@@ -16,6 +15,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
+use zettacache::base_types::*;
+use zettacache::ZettaCache;
 
 pub struct KernelServerState {
     cache: Option<ZettaCache>,

@@ -1,11 +1,8 @@
+use crate::base_types::OnDisk;
 use crate::block_access::*;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
 use crate::range_tree::RangeTree;
-use crate::{
-    base_types::OnDisk,
-    block_based_log::{BlockBasedLog, BlockBasedLogEntry},
-};
 use futures::future;
 use futures::stream::*;
 use serde::{Deserialize, Serialize};

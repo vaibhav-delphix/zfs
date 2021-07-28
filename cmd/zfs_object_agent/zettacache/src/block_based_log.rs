@@ -103,6 +103,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         self.phys.num_entries + self.pending_entries.len() as u64
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.phys.num_entries == 0 && self.pending_entries.is_empty()
     }
@@ -315,6 +316,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
         self.this.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.this.is_empty()
     }

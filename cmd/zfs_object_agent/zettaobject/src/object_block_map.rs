@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use std::ops::Bound::*;
 use std::sync::RwLock;
 use std::time::Instant;
+use zettacache::base_types::*;
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 // XXX make this private and make methods for everything that uses it
@@ -200,6 +201,7 @@ impl ObjectBlockMap {
         state.map.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         let state = self.state.read().unwrap();
         state.map.is_empty()

@@ -137,7 +137,7 @@ rustfmt: $(RUSTDIRS)
 	@if type cargo-fmt > /dev/null 2>&1; then \
 		set -e ; \
 		for dir in $(RUSTDIRS) ; do \
-			cargo-fmt --manifest-path $$dir/Cargo.toml -- --check ; \
+			cargo fmt --all --manifest-path $$dir/Cargo.toml -- --check ; \
 		done \
 	else \
 		echo "skipping rustfmt because cargo-fmt is not installed"; \

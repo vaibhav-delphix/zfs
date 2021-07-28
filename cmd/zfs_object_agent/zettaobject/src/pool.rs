@@ -9,7 +9,6 @@ use crate::object_access::ObjectAccess;
 use crate::object_based_log::*;
 use crate::object_block_map::ObjectBlockMap;
 use crate::object_block_map::StorageObjectLogEntry;
-use crate::zettacache::ZettaCache;
 use anyhow::Error;
 use anyhow::{Context, Result};
 use core::future::Future;
@@ -33,6 +32,8 @@ use stream_reduce::Reduce;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 use uuid::Uuid;
+use zettacache::base_types::*;
+use zettacache::ZettaCache;
 
 // XXX need a real tunables infrastructure.  Probably should use toml.
 // start freeing when the pending frees are this % of the entire pool

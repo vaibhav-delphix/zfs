@@ -1,4 +1,3 @@
-use crate::base_types::*;
 use crate::object_access::ObjectAccess;
 use crate::pool::*;
 use crate::server::{HandlerReturn, Server};
@@ -6,6 +5,7 @@ use anyhow::Result;
 use log::*;
 use nvpair::NvList;
 use rusoto_s3::S3;
+use zettacache::base_types::*;
 
 pub struct UserServerState {}
 

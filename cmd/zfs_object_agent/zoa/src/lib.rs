@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
-use zoa_common::init;
+use zettaobject::init;
 
 /// # Safety
 /// The pointers must be to actual C strings.

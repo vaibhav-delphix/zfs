@@ -1,5 +1,4 @@
 use crate::base_types::*;
-use crate::base_types::{Extent, OnDisk};
 use crate::block_access::*;
 use crate::extent_allocator::ExtentAllocator;
 use crate::range_tree::RangeTree;

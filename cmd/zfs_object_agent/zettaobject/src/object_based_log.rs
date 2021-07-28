@@ -1,5 +1,6 @@
+use crate::base_types::*;
+use crate::object_access::ObjectAccess;
 use crate::pool::PoolSharedState;
-use crate::{base_types::*, object_access::ObjectAccess};
 use anyhow::{Context, Result};
 use async_stream::stream;
 use futures::future;
@@ -12,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
+use zettacache::base_types::*;
 
 pub const ENTRIES_PER_OBJECT: usize = 100_000;
 

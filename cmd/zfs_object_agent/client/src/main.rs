@@ -25,9 +25,10 @@ use std::io::prelude::*;
 use std::io::Read;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
-use zoa_common::base_types::*;
-use zoa_common::object_access::ObjectAccess;
-use zoa_common::pool::*;
+use zettacache::base_types::*;
+use zettaobject::base_types::*;
+use zettaobject::ObjectAccess;
+use zettaobject::Pool;
 mod client;
 
 const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";

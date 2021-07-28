@@ -1,6 +1,5 @@
 use clap::Arg;
 use log::*;
-use zoa_common::init;
 
 fn main() {
     let matches = clap::App::new("ZFS Object Agent")
@@ -40,7 +39,7 @@ fn main() {
 
     let socket_dir = matches.value_of("socket-dir").unwrap();
 
-    init::setup_logging(
+    zettaobject::init::setup_logging(
         matches.occurrences_of("verbosity"),
         matches.value_of("output-file"),
     );
@@ -74,5 +73,5 @@ fn main() {
     // trace!() can be used indiscriminately.
     trace!("logging level TRACE enabled");
 
-    init::start(socket_dir, cache_path);
+    zettaobject::init::start(socket_dir, cache_path);
 }
