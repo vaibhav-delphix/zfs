@@ -3616,7 +3616,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 	 * objects as much, so we should fix this at some point.
 	 */
 	if (!zfs_scan_legacy &&
-	    !vdev_is_object_based(spa->spa_root_vdev->vdev_child[0])) {
+	    !vdev_is_object_based(spa->spa_root_vdev)) {
 		scn->scn_is_sorted = B_TRUE;
 		if (scn->scn_last_checkpoint == 0)
 			scn->scn_last_checkpoint = ddi_get_lbolt();

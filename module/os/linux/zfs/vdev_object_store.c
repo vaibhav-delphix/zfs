@@ -779,7 +779,7 @@ agent_resume(void *arg)
 void
 object_store_begin_txg(vdev_t *vd, uint64_t txg)
 {
-	ASSERT3P(vd->vdev_ops, ==, &vdev_object_store_ops);
+	ASSERT(vdev_is_object_based(vd));
 	vdev_object_store_t *vos = vd->vdev_tsd;
 	ASSERT(vos->vos_send_txg_selector == VOS_TXG_NONE);
 	mutex_enter(&vos->vos_sock_lock);
@@ -805,7 +805,7 @@ void
 object_store_end_txg(vdev_t *vd, nvlist_t *config, uint64_t txg)
 {
 	spa_t *spa = vd->vdev_spa;
-	ASSERT3P(vd->vdev_ops, ==, &vdev_object_store_ops);
+	ASSERT(vdev_is_object_based(vd));
 	vdev_object_store_t *vos = vd->vdev_tsd;
 	mutex_enter(&vos->vos_sock_lock);
 	/*
@@ -836,7 +836,7 @@ object_store_end_txg(vdev_t *vd, nvlist_t *config, uint64_t txg)
 void
 object_store_free_block(vdev_t *vd, uint64_t offset, uint64_t asize)
 {
-	ASSERT3P(vd->vdev_ops, ==, &vdev_object_store_ops);
+	ASSERT(vdev_is_object_based(vd));
 	vdev_object_store_t *vos = vd->vdev_tsd;
 	agent_free_block(vos, offset, asize);
 }
@@ -845,7 +845,7 @@ void
 object_store_flush_writes(spa_t *spa, uint64_t offset)
 {
 	vdev_t *vd = spa->spa_root_vdev->vdev_child[0];
-	ASSERT3P(vd->vdev_ops, ==, &vdev_object_store_ops);
+	ASSERT(vdev_is_object_based(vd));
 	vdev_object_store_t *vos = vd->vdev_tsd;
 	uint64_t blockid = offset >> SPA_MINBLOCKSHIFT;
 	agent_flush_writes(vos, blockid);
@@ -854,7 +854,7 @@ object_store_flush_writes(spa_t *spa, uint64_t offset)
 void
 object_store_get_stats(vdev_t *vd, vdev_object_store_stats_t *vossp)
 {
-	ASSERT3P(vd->vdev_ops, ==, &vdev_object_store_ops);
+	ASSERT(vdev_is_object_based(vd));
 	vdev_object_store_t *vos = vd->vdev_tsd;
 
 	mutex_enter(&vos->vos_stats_lock);

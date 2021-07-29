@@ -5179,8 +5179,17 @@ boolean_t
 vdev_is_object_based(vdev_t *vd)
 {
 	vdev_ops_t *ops = vd->vdev_ops;
-	if (ops == &vdev_object_store_ops)
+	if (vd->vdev_ops->vdev_op_leaf && ops == &vdev_object_store_ops)
 		return (B_TRUE);
+
+	for (int c = 0; c < vd->vdev_children; c++) {
+		vdev_t *cvd = vd->vdev_child[c];
+		if (cvd->vdev_islog || cvd->vdev_aux != NULL)
+			continue;
+
+		if (vdev_is_object_based(cvd))
+			return (B_TRUE);
+	}
 	return (B_FALSE);
 }
 

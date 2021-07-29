@@ -5380,7 +5380,7 @@ metaslab_free_concrete(vdev_t *vd, uint64_t offset, uint64_t asize,
 	metaslab_t *msp;
 	spa_t *spa = vd->vdev_spa;
 
-	if (vd->vdev_ops == &vdev_object_store_ops) {
+	if (vdev_is_object_based(vd)) {
 		/*
 		 * XXX might be better to put it in ms_freeing and then send up
 		 * the whole rangetree in metaslab_sync().
@@ -6071,7 +6071,7 @@ metaslab_check_free_impl(vdev_t *vd, uint64_t offset, uint64_t size)
 	if ((zfs_flags & ZFS_DEBUG_ZIO_FREE) == 0)
 		return;
 
-	if (vd->vdev_ops == &vdev_object_store_ops)
+	if (vdev_is_object_based(vd))
 		return;
 
 	if (vd->vdev_ops->vdev_op_remap != NULL) {

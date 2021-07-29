@@ -362,7 +362,7 @@ spa_prop_get_config(spa_t *spa, nvlist_t **nvp)
 			freeing +=
 			    dsl_dir_phys(pool->dp_free_dir)->dd_used_bytes;
 		}
-		if (vdev_is_object_based(rvd->vdev_child[0])) {
+		if (vdev_is_object_based(rvd)) {
 			vdev_object_store_stats_t voss;
 			object_store_get_stats(rvd->vdev_child[0], &voss);
 			freeing += voss.voss_pending_frees_bytes;
@@ -6478,16 +6478,8 @@ spa_export_common(const char *pool, int new_state, nvlist_t **oldconfig,
 		if (new_state != POOL_STATE_UNINITIALIZED && !hardforce) {
 			spa_config_enter(spa, SCL_ALL, FTAG, RW_WRITER);
 			spa->spa_state = new_state;
-			/*
-			 * XXX There's no mechanical backing for the
-			 * final_txg, it's just an estimate of about how many
-			 * TXGs we need. Changes to the export process can
-			 * cause this to suddenly start failing for no obvious
-			 * reason. We should improve this system to be more
-			 * predictable and understandable.
-			 */
 			spa->spa_final_txg = spa_last_synced_txg(spa) +
-			    TXG_DEFER_SIZE + 3;
+			    TXG_DEFER_SIZE + 1;
 			vdev_config_dirty(spa->spa_root_vdev);
 			spa_config_exit(spa, SCL_ALL, FTAG);
 		}

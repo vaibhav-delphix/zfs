@@ -1380,7 +1380,7 @@ zio_read_phys(zio_t *pio, vdev_t *vd, uint64_t offset, uint64_t size,
 	ASSERT(!labels || offset + size <= VDEV_LABEL_START_SIZE ||
 	    offset >= vd->vdev_psize - VDEV_LABEL_END_SIZE);
 	ASSERT3U(offset + size, <=, vd->vdev_psize);
-	ASSERT3P(vd->vdev_ops, !=, &vdev_object_store_ops);
+	ASSERT(!vdev_is_object_based(vd));
 
 	zio = zio_create(pio, vd->vdev_spa, 0, NULL, data, size, size, done,
 	    private, ZIO_TYPE_READ, priority, flags | ZIO_FLAG_PHYSICAL, vd,
@@ -1402,7 +1402,7 @@ zio_write_phys(zio_t *pio, vdev_t *vd, uint64_t offset, uint64_t size,
 	ASSERT(!labels || offset + size <= VDEV_LABEL_START_SIZE ||
 	    offset >= vd->vdev_psize - VDEV_LABEL_END_SIZE);
 	ASSERT3U(offset + size, <=, vd->vdev_psize);
-	ASSERT3P(vd->vdev_ops, !=, &vdev_object_store_ops);
+	ASSERT(!vdev_is_object_based(vd));
 
 	zio = zio_create(pio, vd->vdev_spa, 0, NULL, data, size, size, done,
 	    private, ZIO_TYPE_WRITE, priority, flags | ZIO_FLAG_PHYSICAL, vd,

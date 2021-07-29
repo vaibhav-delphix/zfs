@@ -1933,14 +1933,19 @@ retry:
 	if (txg > spa_freeze_txg(spa))
 		return (0);
 
-	ASSERT3U(txg, <=, spa->spa_final_txg);
-
-	if (svd[0]->vdev_ops == &vdev_object_store_ops) {
+	/*
+	 * If this pool is using object storage, then
+	 * it only needs to notify the backend that
+	 * we've completed the txg and return.
+	 */
+	if (vdev_is_object_based(spa->spa_root_vdev)) {
 		nvlist_t *label = spa_config_generate(spa,
 		    svd[0], txg, B_FALSE);
 		object_store_end_txg(svd[0], label, txg);
 		return (0);
 	}
+
+	ASSERT3U(txg, <=, spa_final_dirty_txg(spa));
 
 	/*
 	 * Flush the write cache of every disk that's been written to
