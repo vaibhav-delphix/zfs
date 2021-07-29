@@ -49,7 +49,6 @@ ZFS_DBGMSG="$STF_SUITE/callbacks/zfs_dbgmsg.ksh"
 ZFS_DMESG="$STF_SUITE/callbacks/zfs_dmesg.ksh"
 UNAME=$(uname -s)
 ZOA_LOG="/var/zoa.log"
-ZTS_CREDENTIALS_FILE="/etc/zfs/zpool_credentials"
 
 # Override some defaults if on FreeBSD
 if [ "$UNAME" = "FreeBSD" ] ; then
@@ -586,17 +585,14 @@ msg "STF_PATH:        $STF_PATH"
 if [ -n "$ZTS_OBJECT_STORE" ]; then
 	# No need to specify disks if we're using object storage
 
-    #
-    # Ensure that all the required environment variables for object storage are
-    # set. If any of them is unset, exit the script.
-    #
-    [ -n "$ZTS_OBJECT_ENDPOINT" ] || fail "ZTS_OBJECT_ENDPOINT is unset."
+	#
+	# Ensure that all the required environment variables for object
+	# storage are set. If any of them is unset, exit the script.
+	#
+	[ -n "$ZTS_OBJECT_ENDPOINT" ] || fail "ZTS_OBJECT_ENDPOINT is unset."
 	[ -n "$ZTS_BUCKET_NAME" ] || fail "ZTS_BUCKET_NAME is unset."
-	[ -n "$AWS_ACCESS_KEY_ID" ] || fail "AWS_ACCESS_KEY_ID is unset."
-	[ -n "$AWS_SECRET_ACCESS_KEY" ] || \
-	        fail "AWS_SECRET_ACCESS_KEY is unset."
 	[ -n "$ZTS_REGION" ] || fail "ZTS_REGION is unset."
-    [ -n "$ZTS_CREDENTIALS_FILE" ] || fail "ZTS_CREDENTIALS_FILE is unset."
+	[ -n "$ZTS_CREDS_PROFILE" ] || export ZTS_CREDS_PROFILE=default
 
 	# Set RUST_BACKTRACE environment variable to generate proper stack
 	# traces for zfs_object_agent service crash.
@@ -609,18 +605,15 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 	# start the agent.
 	#
 	if [ -f "$ZOA_LOG" ]; then
-        sudo rm -f $ZOA_LOG
-    fi
-    sudo -E /sbin/zfs_object_agent -vv --output-file=$ZOA_LOG &
+		sudo rm -f $ZOA_LOG
+	fi
+	sudo -E /sbin/zfs_object_agent -vv \
+	    --output-file=$ZOA_LOG >/dev/null 2>&1 &
 
-    #
-    # Create the ZTS credentials file and export the location as an environment
-    # variable.
-    #
-    echo "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" | \
-        sudo tee $ZTS_CREDENTIALS_FILE
-
-    export ZTS_CREDENTIALS_FILE=$ZTS_CREDENTIALS_FILE
+	# Verify connectivity before proceeding
+	/sbin/zoa_test -p "$ZTS_CREDS_PROFILE" -b "$ZTS_BUCKET_NAME" \
+	    test_connectivity >/dev/null 2>&1 || \
+	    fail "Unable to connect to $ZTS_BUCKET_NAME"
 
 elif [ -z "${DISKS}" ]; then
 	#
@@ -696,7 +689,6 @@ msg "Keep pool(s):          $KEEP"
 msg "Missing util(s):       $STF_MISSING_BIN"
 msg "ZTS_OBJECT_STORE:      $ZTS_OBJECT_STORE"
 msg "RUST_BACKTRACE:        $RUST_BACKTRACE"
-msg "ZTS_CREDENTIALS_FILE:  $ZTS_CREDENTIALS_FILE"
 msg ""
 
 export STF_TOOLS

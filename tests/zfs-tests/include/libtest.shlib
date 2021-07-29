@@ -1777,9 +1777,9 @@ function create_pool
 	fi
 
 	if [[ -z $devices_list ]] && ! use_object_store; then
-	    log_note "Either devices list should be passed or ZTS_OBJECT_STORE should be set"
-	    return 1
-    fi
+		log_note "ZTS_OBJECT_STORE and devices list are empty."
+		return 1
+	fi
 
 	if poolexists $pool ; then
 		destroy_pool $pool
@@ -1794,7 +1794,7 @@ function create_pool
 		log_must zpool create \
 		    -o object-endpoint=$ZTS_OBJECT_ENDPOINT \
 		    -o object-region=$ZTS_REGION \
-		    -o object-credentials-location=file://$ZTS_CREDENTIALS_FILE \
+		    -o object-credentials-profile=$ZTS_CREDS_PROFILE \
 		    $extra_options \
 		    $pool s3 $ZTS_BUCKET_NAME
 	else
@@ -3314,21 +3314,14 @@ function get_rootpool
 }
 
 #
-# Get the word numbers from a string separated by white space
-#
-function get_word_count
-{
-	echo $1 | wc -w
-}
-
-#
 # To verify if the require numbers of disks is given
 #
 function verify_disk_count
 {
 	typeset -i min=${2:-1}
+	typeset -i count=$(wc -w "$1")
 
-	typeset -i count=$(get_word_count "$1")
+	use_object_store && return
 
 	if ((count < min)); then
 		log_untested "A minimum of $min disks is required to run." \

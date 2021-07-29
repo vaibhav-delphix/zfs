@@ -90,8 +90,7 @@ function do_fio_run_impl
 
 	if $clear_cache; then
 		# Clear the ARC
-		zpool export $PERFPOOL
-		zpool import $PERFPOOL
+		log_must zinject -a
 	fi
 
 	if [[ -n $ZINJECT_DELAYS ]]; then
