@@ -35,6 +35,14 @@ fn main() {
                 .help("File/device to use for ZettaCache")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("config-file")
+                .short("t")
+                .long("config-file")
+                .value_name("FILE")
+                .help("Configuration file to set tunables (toml/json/yaml")
+                .takes_value(true),
+        )
         .get_matches();
 
     let socket_dir = matches.value_of("socket-dir").unwrap();
@@ -43,7 +51,12 @@ fn main() {
         matches.occurrences_of("verbosity"),
         matches.value_of("output-file"),
     );
+
     let cache_path = matches.value_of("cache-file");
+
+    if let Some(file_name) = matches.value_of("config-file") {
+        zettacache::read_tunable_config(file_name);
+    }
 
     error!(
         "Starting ZFS Object Agent.  Local timezone is {}",

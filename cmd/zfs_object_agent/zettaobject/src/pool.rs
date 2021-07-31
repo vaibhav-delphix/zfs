@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 use core::future::Future;
 use futures::future;
 use futures::stream::*;
+use lazy_static::lazy_static;
 use log::*;
 use more_asserts::*;
 use nvpair::NvList;
@@ -33,26 +34,30 @@ use tokio::sync::oneshot;
 use tokio::time::sleep;
 use uuid::Uuid;
 use zettacache::base_types::*;
+use zettacache::get_tunable;
 use zettacache::ZettaCache;
 
-// XXX need a real tunables infrastructure.  Probably should use toml.
-// start freeing when the pending frees are this % of the entire pool
-const FREE_HIGHWATER_PCT: f64 = 10.0;
-// stop freeing when the pending frees are this % of the free log
-const FREE_LOWWATER_PCT: f64 = 40.0;
-// don't bother freeing unless there are at least this number of free blocks
-const FREE_MIN_BLOCKS: u64 = 1000;
-const MAX_BYTES_PER_OBJECT: u32 = 1024 * 1024;
+lazy_static! {
+    // start freeing when the pending frees are this % of the entire pool
+    static ref FREE_HIGHWATER_PCT: f64 = get_tunable("free_highwater_pct", 10.0);
+    // stop freeing when the pending frees are this % of the free log
+    static ref FREE_LOWWATER_PCT: f64 = get_tunable("free_lowwater_pct", 40.0);
+    // don't bother freeing unless there are at least this number of free blocks
+    static ref FREE_MIN_BLOCKS: u64 = get_tunable("free_min_blocks", 1000);
+    static ref MAX_BYTES_PER_OBJECT: u32 = get_tunable("max_bytes_per_object", 1024 * 1024);
+
+    static ref PENDING_FREE_LOG_COUNT: u64 = get_tunable("pending_free_log_count", 100);
+
+    // minimum number of chunks before we consider condensing
+    static ref LOG_CONDENSE_MIN_CHUNKS: usize = get_tunable("log_condense_min_chunks", 30);
+    // when log is 5x as large as the condensed version
+    static ref LOG_CONDENSE_MULTIPLE: usize = get_tunable("log_condense_multiple", 5);
+
+    static ref CLAIM_DURATION: Duration = Duration::from_secs(get_tunable("claim_duration_secs", 2));
+}
+
 const ONE_MIB: u64 = 1_048_576;
 
-const PENDING_FREE_LOG_COUNT: u64 = 100;
-
-// minimum number of chunks before we consider condensing
-const LOG_CONDENSE_MIN_CHUNKS: usize = 30;
-// when log is 5x as large as the condensed version
-const LOG_CONDENSE_MULTIPLE: usize = 5;
-
-const CLAIM_DURATION: Duration = Duration::from_secs(2);
 enum OwnResult {
     Success,
     Failure(HeartbeatPhys),
@@ -461,7 +466,7 @@ impl PoolSyncingState {
         let nlogs = self.pending_frees_log.len() as u64;
         let log =
             FreeLogId(((object_block_map.block_to_object(ent.block).0 / 1000) % nlogs) as usize);
-        assert_lt!(log.0, PENDING_FREE_LOG_COUNT as usize);
+        assert_lt!(log.0, *PENDING_FREE_LOG_COUNT as usize);
 
         self.get_free_log(log).append(txg, ent);
     }
@@ -618,7 +623,7 @@ impl Pool {
 
             // Start with 100 logs, each capable of 32 million entries
             let mut logs = Vec::new();
-            for i in 0..PENDING_FREE_LOG_COUNT {
+            for i in 0..*PENDING_FREE_LOG_COUNT {
                 // Note: right side is exclusive
                 logs.push(ObjectBasedLog::create(
                     shared_state.clone(),
@@ -851,7 +856,7 @@ impl Pool {
             Self::write_unordered_to_pending_object(
                 state,
                 syncing_state,
-                Some(MAX_BYTES_PER_OBJECT),
+                Some(*MAX_BYTES_PER_OBJECT),
             );
             info!("resume: completed");
         })
@@ -1213,7 +1218,7 @@ impl Pool {
                 Self::write_unordered_to_pending_object(
                     &self.state,
                     syncing_state,
-                    Some(MAX_BYTES_PER_OBJECT),
+                    Some(*MAX_BYTES_PER_OBJECT),
                 );
                 receiver
             }
@@ -1296,8 +1301,8 @@ impl Pool {
                  * a couple seconds. In the case where there are unexpected s3 failures or network
                  * problems, we wait for the full duration.
                  */
-                let short_duration = HEARTBEAT_INTERVAL * 2;
-                let long_duration = LEASE_DURATION * 2 - short_duration;
+                let short_duration = *HEARTBEAT_INTERVAL * 2;
+                let long_duration = *LEASE_DURATION * 2 - short_duration;
                 sleep(short_duration).await;
                 if let Ok(new_heartbeat) = HeartbeatPhys::get(object_access, owner.owner).await {
                     if heartbeat.timestamp != new_heartbeat.timestamp {
@@ -1324,7 +1329,7 @@ impl Pool {
             }
         }
 
-        if duration > CLAIM_DURATION {
+        if duration > *CLAIM_DURATION {
             return OwnResult::Retry;
         }
 
@@ -1334,13 +1339,13 @@ impl Pool {
         };
 
         let put_result = owner
-            .put_timeout(object_access, Some(CLAIM_DURATION - duration))
+            .put_timeout(object_access, Some(*CLAIM_DURATION - duration))
             .await;
 
         if let Err(OAError::TimeoutError(_)) = put_result {
             return OwnResult::Retry;
         }
-        sleep(CLAIM_DURATION * 3).await;
+        sleep(*CLAIM_DURATION * 3).await;
 
         let final_owner = PoolOwnerPhys::get(object_access, guid).await.unwrap();
         if final_owner.owner != id {
@@ -1350,7 +1355,7 @@ impl Pool {
                     .unwrap_or(HeartbeatPhys {
                         timestamp: SystemTime::now(),
                         hostname: "unknown".to_string(),
-                        lease_duration: LEASE_DURATION,
+                        lease_duration: *LEASE_DURATION,
                         id: final_owner.owner,
                     }),
             );
@@ -1714,8 +1719,8 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
 
     // XXX make this tunable?
     if syncing_state.stats.pending_frees_bytes
-        < (syncing_state.stats.blocks_bytes as f64 * FREE_HIGHWATER_PCT / 100f64) as u64
-        || syncing_state.stats.pending_frees_count < FREE_MIN_BLOCKS
+        < (syncing_state.stats.blocks_bytes as f64 * *FREE_HIGHWATER_PCT / 100f64) as u64
+        || syncing_state.stats.pending_frees_count < *FREE_MIN_BLOCKS
     {
         return;
     }
@@ -1769,7 +1774,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
         let (freed_bytes, mut frees_per_object) =
             get_frees_per_obj(&state, pending_frees_log_stream).await;
 
-        let required_free_bytes = (freed_bytes as f64 * FREE_LOWWATER_PCT / 100.0) as u64;
+        let required_free_bytes = (freed_bytes as f64 * *FREE_LOWWATER_PCT / 100.0) as u64;
 
         // sort objects by number of free blocks
         // XXX should be based on free space (bytes)?  And perhaps objects that
@@ -1823,7 +1828,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
                     if writing.contains(later_obj) {
                         break;
                     }
-                    if new_size + later_new_size > MAX_BYTES_PER_OBJECT {
+                    if new_size + later_new_size > *MAX_BYTES_PER_OBJECT {
                         break;
                     }
                 }
@@ -1913,8 +1918,8 @@ async fn try_condense_object_log(state: Arc<PoolState>, syncing_state: &mut Pool
     // XXX change this to be based on bytes, once those stats are working?
     let len = state.object_block_map.len();
     if syncing_state.storage_object_log.num_chunks
-        < (LOG_CONDENSE_MIN_CHUNKS
-            + LOG_CONDENSE_MULTIPLE * (len + ENTRIES_PER_OBJECT) / ENTRIES_PER_OBJECT)
+        < (*LOG_CONDENSE_MIN_CHUNKS
+            + *LOG_CONDENSE_MULTIPLE * (len + *ENTRIES_PER_OBJECT) / *ENTRIES_PER_OBJECT)
             as u64
     {
         return;
@@ -1963,8 +1968,8 @@ async fn try_condense_object_sizes(
     // XXX change this to be based on bytes, once those stats are working?
     let len = object_sizes.len();
     if syncing_state.object_size_log.num_chunks
-        < (LOG_CONDENSE_MIN_CHUNKS
-            + LOG_CONDENSE_MULTIPLE * (len + ENTRIES_PER_OBJECT) / ENTRIES_PER_OBJECT)
+        < (*LOG_CONDENSE_MIN_CHUNKS
+            + *LOG_CONDENSE_MULTIPLE * (len + *ENTRIES_PER_OBJECT) / *ENTRIES_PER_OBJECT)
             as u64
     {
         return;

@@ -7,6 +7,7 @@ use futures::future;
 use futures::future::join_all;
 use futures::stream::{FuturesOrdered, StreamExt};
 use futures_core::Stream;
+use lazy_static::lazy_static;
 use log::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -14,8 +15,11 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
 use zettacache::base_types::*;
+use zettacache::get_tunable;
 
-pub const ENTRIES_PER_OBJECT: usize = 100_000;
+lazy_static! {
+    pub static ref ENTRIES_PER_OBJECT: usize = get_tunable("entries_per_object", 100_000);
+}
 
 /*
  * Note: The OBLIterator returns a struct, not a reference. That way it doesn't
@@ -187,7 +191,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
         // XXX assert that txg is the same as the txg for the other pending entries?
         self.pending_entries.push(entry);
         // XXX should be based on chunk size (bytes)?  Or maybe should just be unlimited.
-        if self.pending_entries.len() > 100_000 {
+        if self.pending_entries.len() > *ENTRIES_PER_OBJECT {
             self.initiate_flush(txg);
         }
     }

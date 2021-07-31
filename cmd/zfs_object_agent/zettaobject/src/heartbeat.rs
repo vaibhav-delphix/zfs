@@ -10,10 +10,16 @@ use std::{
 };
 use tokio::sync::watch::{self, Receiver};
 use uuid::Uuid;
+use zettacache::get_tunable;
 
-pub const LEASE_DURATION: Duration = Duration::from_secs(10);
-pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
-pub const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+lazy_static! {
+    pub static ref LEASE_DURATION: Duration =
+        Duration::from_millis(get_tunable("lease_duration_ms", 10_000));
+    pub static ref HEARTBEAT_INTERVAL: Duration =
+        Duration::from_millis(get_tunable("heartbeat_interval_ms", 1_000));
+    pub static ref WRITE_TIMEOUT: Duration =
+        Duration::from_millis(get_tunable("write_timeout_ms", 2_000));
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct HeartbeatPhys {
@@ -139,7 +145,7 @@ pub async fn start_heartbeat(object_access: ObjectAccess, id: Uuid) -> Heartbeat
     tokio::spawn(async move {
         let mut last_heartbeat = None;
         info!("Starting heartbeat with id {}", id);
-        let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        let mut interval = tokio::time::interval(*HEARTBEAT_INTERVAL);
         loop {
             interval.tick().await;
             {
@@ -163,11 +169,11 @@ pub async fn start_heartbeat(object_access: ObjectAccess, id: Uuid) -> Heartbeat
             let heartbeat = HeartbeatPhys {
                 timestamp: SystemTime::now(),
                 hostname: hostname::get().unwrap().into_string().unwrap(),
-                lease_duration: LEASE_DURATION,
+                lease_duration: *LEASE_DURATION,
                 id,
             };
             let result = heartbeat
-                .put_timeout(&object_access, Some(WRITE_TIMEOUT))
+                .put_timeout(&object_access, Some(*WRITE_TIMEOUT))
                 .await;
             if lease_timed_out(&last_heartbeat) {
                 panic!("Suspending pools due to lease timeout");

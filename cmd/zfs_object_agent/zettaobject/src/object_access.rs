@@ -16,6 +16,7 @@ use std::time::Instant;
 use std::{collections::HashMap, fmt::Display};
 use std::{env, error::Error};
 use tokio::{sync::watch, time::error::Elapsed};
+use zettacache::get_tunable;
 
 struct ObjectCache {
     // XXX cache key should include Bucket
@@ -40,10 +41,9 @@ lazy_static! {
         StatusCode::PRECONDITION_FAILED,
         StatusCode::PAYLOAD_TOO_LARGE,
     ];
+    // log operations that take longer than this with info!()
+    static ref LONG_OPERATION_DURATION: Duration = Duration::from_secs(get_tunable("long_operation_secs", 2));
 }
-
-// log operations that take longer than this with info!()
-const LONG_OPERATION_DURATION: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct ObjectAccess {
@@ -108,7 +108,7 @@ where
                     e,
                     delay.as_millis()
                 );
-                if delay > LONG_OPERATION_DURATION {
+                if delay > *LONG_OPERATION_DURATION {
                     info!(
                         "long retry: {} returned: {:?}; retrying in {:?}",
                         msg, e, delay
@@ -144,7 +144,7 @@ where
     };
     let elapsed = begin.elapsed();
     debug!("{}: returned in {}ms", msg, elapsed.as_millis());
-    if elapsed > LONG_OPERATION_DURATION {
+    if elapsed > *LONG_OPERATION_DURATION {
         info!("long completion: {}: returned in {:?}", msg, elapsed);
     }
     result

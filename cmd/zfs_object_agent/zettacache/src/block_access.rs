@@ -1,7 +1,9 @@
 use crate::base_types::DiskLocation;
 use crate::base_types::Extent;
+use crate::get_tunable;
 use anyhow::{anyhow, Result};
 use bincode::Options;
+use lazy_static::lazy_static;
 use log::*;
 use metered::common::*;
 use metered::hdr_histogram::AtomicHdrHistogram;
@@ -20,8 +22,9 @@ use std::time::Instant;
 use tokio::fs::File;
 use tokio::fs::OpenOptions;
 
-//const MIN_SECTOR_SIZE: usize = 4 * 1024;
-const MIN_SECTOR_SIZE: usize = 512;
+lazy_static! {
+    static ref MIN_SECTOR_SIZE: usize = get_tunable("min_sector_size", 512);
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct BlockHeader {
@@ -94,7 +97,7 @@ impl BlockAccess {
             //sector_size = MIN_SECTOR_SIZE;
         } else if mode.contains(SFlag::S_IFREG) {
             size = stat.st_size as u64;
-            sector_size = MIN_SECTOR_SIZE;
+            sector_size = *MIN_SECTOR_SIZE;
         } else {
             panic!("{}: invalid file type {:?}", disk_path, mode);
         }

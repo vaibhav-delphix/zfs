@@ -5,11 +5,13 @@ use crate::block_allocator::BlockAllocatorPhys;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorPhys;
+use crate::get_tunable;
 use crate::index::*;
 use anyhow::Result;
 use futures::future;
 use futures::stream::*;
 use futures::Future;
+use lazy_static::lazy_static;
 use log::*;
 use metered::common::*;
 use metered::hdr_histogram::AtomicHdrHistogram;
@@ -26,13 +28,14 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::Semaphore;
 
-const SUPERBLOCK_SIZE: usize = 4 * 1024;
-//const SUPERBLOCK_MAGIC: u64 = 0x2e11acac4e;
-const DEFAULT_CHECKPOINT_RING_BUFFER_SIZE: usize = 1024 * 1024;
-const DEFAULT_SLAB_SIZE: usize = 16 * 1024 * 1024;
-const DEFAULT_METADATA_SIZE_PCT: f64 = 5.0; // Can lower this to test forced eviction.
-const MAX_PENDING_CHANGES: usize = 50_000; // XXX should be based on RAM usage, ~tens of millions at least
-const TARGET_CACHE_SIZE_PCT: u64 = 10;
+lazy_static! {
+    static ref SUPERBLOCK_SIZE: usize = get_tunable("superblock_size", 4 * 1024);
+    static ref DEFAULT_CHECKPOINT_RING_BUFFER_SIZE: usize = get_tunable("default_checkpoint_ring_buffer_size", 1024 * 1024);
+    static ref DEFAULT_SLAB_SIZE: usize = get_tunable("default_slab_size", 16 * 1024 * 1024);
+    static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 5.0); // Can lower this to test forced eviction.
+    static ref MAX_PENDING_CHANGES: usize = get_tunable("max_pending_changes", 50_000); // XXX should be based on RAM usage, ~tens of millions at least
+    static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 10);
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ZettaSuperBlockPhys {
@@ -50,7 +53,7 @@ impl ZettaSuperBlockPhys {
         let raw = block_access
             .read_raw(Extent {
                 location: DiskLocation { offset: 0 },
-                size: SUPERBLOCK_SIZE,
+                size: *SUPERBLOCK_SIZE,
             })
             .await;
         let (this, _): (Self, usize) = block_access.chunk_from_raw(&raw)?;
@@ -240,10 +243,10 @@ struct ZettaCacheState {
 impl ZettaCache {
     pub async fn create(path: &str) {
         let block_access = BlockAccess::new(path).await;
-        let metadata_start = SUPERBLOCK_SIZE + DEFAULT_CHECKPOINT_RING_BUFFER_SIZE;
+        let metadata_start = *SUPERBLOCK_SIZE + *DEFAULT_CHECKPOINT_RING_BUFFER_SIZE;
         let data_start = block_access.round_up_to_sector(
             metadata_start as u64
-                + (DEFAULT_METADATA_SIZE_PCT / 100.0 * block_access.size() as f64) as u64,
+                + (*DEFAULT_METADATA_SIZE_PCT / 100.0 * block_access.size() as f64) as u64,
         );
         let checkpoint = ZettaCheckpointPhys {
             generation: CheckpointId(0),
@@ -261,22 +264,22 @@ impl ZettaCache {
             ),
         };
         let raw = block_access.chunk_to_raw(EncodeType::Json, &checkpoint);
-        assert_le!(raw.len(), DEFAULT_CHECKPOINT_RING_BUFFER_SIZE);
+        assert_le!(raw.len(), *DEFAULT_CHECKPOINT_RING_BUFFER_SIZE);
         let checkpoint_size = raw.len();
         block_access
             .write_raw(
                 DiskLocation {
-                    offset: SUPERBLOCK_SIZE as u64,
+                    offset: *SUPERBLOCK_SIZE as u64,
                 },
                 raw,
             )
             .await;
         let phys = ZettaSuperBlockPhys {
-            checkpoint_ring_buffer_size: DEFAULT_CHECKPOINT_RING_BUFFER_SIZE as u32,
-            slab_size: DEFAULT_SLAB_SIZE as u32,
+            checkpoint_ring_buffer_size: *DEFAULT_CHECKPOINT_RING_BUFFER_SIZE as u32,
+            slab_size: *DEFAULT_SLAB_SIZE as u32,
             last_checkpoint_extent: Extent {
                 location: DiskLocation {
-                    offset: SUPERBLOCK_SIZE as u64,
+                    offset: *SUPERBLOCK_SIZE as u64,
                 },
                 size: checkpoint_size,
             },
@@ -303,7 +306,7 @@ impl ZettaCache {
 
         assert_eq!(checkpoint.generation, phys.last_checkpoint_id);
 
-        let metadata_start = SUPERBLOCK_SIZE + phys.checkpoint_ring_buffer_size as usize;
+        let metadata_start = *SUPERBLOCK_SIZE + phys.checkpoint_ring_buffer_size as usize;
         // XXX pass in the metadata_start to ExtentAllocator::open, rather than
         // having this represented twice in the on-disk format?
         assert_eq!(
@@ -877,7 +880,7 @@ impl ZettaCacheState {
             "{:?} pending changes at checkpoint",
             self.pending_changes.len()
         );
-        if self.pending_changes.len() > MAX_PENDING_CHANGES {
+        if self.pending_changes.len() > *MAX_PENDING_CHANGES {
             index.flush().await;
             let new_index = self.merge_pending_changes(index).await;
             index.clear();
@@ -911,7 +914,7 @@ impl ZettaCacheState {
             > (checkpoint.extent_allocator.first_valid_offset - checkpoint_location.offset) as usize
         {
             // Out of space; go back to the beginning of the checkpoint space.
-            checkpoint_location.offset = SUPERBLOCK_SIZE as u64;
+            checkpoint_location.offset = *SUPERBLOCK_SIZE as u64;
             assert_le!(
                 raw.len(),
                 (self.super_phys.last_checkpoint_extent.location.offset
@@ -967,7 +970,7 @@ impl ZettaCacheState {
         // a new generation (as we do with ObjectBasedLog).
 
         // Calculate an eviction atime for the new index: use 10% of available space:
-        let target_size = (self.block_access.size() / 100) * TARGET_CACHE_SIZE_PCT;
+        let target_size = (self.block_access.size() / 100) * *TARGET_CACHE_SIZE_PCT;
         info!(
             "target cache size for storage size {} is {}",
             self.block_access.size(),

@@ -2,11 +2,13 @@ use crate::base_types::*;
 use crate::block_access::BlockAccess;
 use crate::block_access::EncodeType;
 use crate::extent_allocator::ExtentAllocator;
+use crate::get_tunable;
 use anyhow::Context;
 use async_stream::stream;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use futures_core::Stream;
+use lazy_static::lazy_static;
 use log::*;
 use more_asserts::*;
 use serde::de::DeserializeOwned;
@@ -22,10 +24,11 @@ use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Instant;
 
-// XXX maybe this is wasteful for the smaller logs?
-const DEFAULT_EXTENT_SIZE: usize = 128 * 1024 * 1024;
-//const READ_IO_SIZE: usize = 1 * 1024 * 1024;
-const ENTRIES_PER_CHUNK: usize = 200;
+lazy_static! {
+    // XXX maybe this is wasteful for the smaller logs?
+    static ref DEFAULT_EXTENT_SIZE: usize = get_tunable("default_extent_size", 128 * 1024 * 1024);
+    static ref ENTRIES_PER_CHUNK: usize = get_tunable("entries_per_chunk", 200);
+}
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct BlockBasedLogPhys {
@@ -127,7 +130,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         }
 
         let writes_stream = FuturesUnordered::new();
-        for pending_entries_chunk in self.pending_entries.chunks(ENTRIES_PER_CHUNK) {
+        for pending_entries_chunk in self.pending_entries.chunks(*ENTRIES_PER_CHUNK) {
             let chunk = BlockBasedLogChunk {
                 id: self.phys.next_chunk,
                 offset: self.phys.next_chunk_offset,
@@ -153,7 +156,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
 
                 extent = self
                     .extent_allocator
-                    .allocate(raw_size, max(raw_size, DEFAULT_EXTENT_SIZE));
+                    .allocate(raw_size, max(raw_size, *DEFAULT_EXTENT_SIZE));
                 self.phys.extents.insert(capacity, extent);
                 assert_ge!(extent.size, raw_size);
             }
