@@ -9,11 +9,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use log::*;
 use nvpair::{NvData, NvList, NvListRef};
-use std::cmp::max;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
 use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
@@ -26,8 +22,6 @@ pub struct KernelServerState {
 #[derive(Default)]
 struct KernelConnectionState {
     pool: Option<Arc<Pool>>,
-    num_outstanding_writes: Arc<AtomicUsize>,
-    max_blockid: Option<BlockId>, // Maximum blockID that we've received a write for
     cache: Option<ZettaCache>,
     id: Uuid,
 }
@@ -59,10 +53,6 @@ impl KernelConnectionState {
         server.register_serial_handler("create pool", Box::new(Self::create_pool));
         server.register_serial_handler("open pool", Box::new(Self::open_pool));
         server.register_serial_handler("resume complete", Box::new(Self::resume_complete));
-
-        // XXX shouldn't be needed once the kernel sends "flush writes" appropriately.
-        server.register_timeout_handler(Duration::from_millis(100), Box::new(Self::timeout));
-
         server.register_handler("begin txg", Box::new(Self::begin_txg));
         server.register_handler("resume txg", Box::new(Self::resume_txg));
         server.register_handler("flush writes", Box::new(Self::flush_writes));
@@ -182,9 +172,8 @@ impl KernelConnectionState {
     fn flush_writes(&mut self, nvl: NvList) -> HandlerReturn {
         trace!("got request: {:?}", nvl);
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("no pool open"))?;
-        if let Some(max_blockid) = self.max_blockid {
-            pool.initiate_flush(max_blockid);
-        }
+        let block = BlockId(nvl.lookup_uint64("block")?);
+        pool.initiate_flush(block);
         handler_return_ok(None)
     }
 
@@ -210,11 +199,6 @@ impl KernelConnectionState {
 
     fn end_txg(&mut self, nvl: NvList) -> HandlerReturn {
         debug!("got request: {:?}", nvl);
-
-        // client should have already flushed all writes
-        if self.num_outstanding_writes.load(Ordering::Acquire) != 0 {
-            return Err(anyhow!("outstanding writes while trying to end txg"));
-        }
 
         let pool = self
             .pool
@@ -251,23 +235,15 @@ impl KernelConnectionState {
                 slice.len()
             );
 
-            self.max_blockid = Some(match self.max_blockid {
-                Some(max_blockid) => max(block, max_blockid),
-                None => block,
-            });
-
             let pool = self
                 .pool
                 .as_ref()
                 .ok_or_else(|| anyhow!("no pool open"))?
                 .clone();
-            self.num_outstanding_writes.fetch_add(1, Ordering::Release);
             // Need to write_block() before spawning, so that the Pool knows what's been written before resume_complete()
             let fut = pool.write_block(block, slice.to_vec());
-            let now = self.num_outstanding_writes.clone();
             Ok(Box::pin(async move {
                 fut.await;
-                now.fetch_sub(1, Ordering::Release);
                 let mut nvl = NvList::new_unique_names();
                 nvl.insert("Type", "write done").unwrap();
                 nvl.insert("block", &block.0).unwrap();
@@ -346,16 +322,5 @@ impl KernelConnectionState {
     fn exit_agent(&mut self, nvl: NvList) -> HandlerReturn {
         info!("got request: {:?}", nvl);
         Err(anyhow!("exit requested"))
-    }
-
-    fn timeout(&mut self) {
-        if let Some(pool) = &self.pool {
-            if self.num_outstanding_writes.load(Ordering::Acquire) > 0 {
-                if let Some(max_blockid) = self.max_blockid {
-                    trace!("timeout; flushing writes");
-                    pool.initiate_flush(max_blockid);
-                }
-            }
-        }
     }
 }

@@ -15,7 +15,6 @@ use nvpair::{NvEncoding, NvList};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
@@ -27,7 +26,6 @@ pub struct Server<Ss, Cs> {
     socket_path: String,
     state: Ss,
     connection_handler: Box<ConnectionHandler<Ss, Cs>>,
-    timeout: Option<(Duration, Box<TimeoutHandler<Cs>>)>,
     handlers: HashMap<String, HandlerEnum<Cs>>,
 }
 
@@ -35,8 +33,6 @@ enum HandlerEnum<Cs> {
     Serial(Box<SerialHandler<Cs>>),
     Concurrent(Box<Handler<Cs>>),
 }
-
-type TimeoutHandler<Cs> = dyn Fn(&mut Cs) + Send + Sync;
 
 type ConnectionHandler<Ss, Cs> = dyn Fn(&Ss) -> Cs + Send + Sync;
 
@@ -61,7 +57,6 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
             socket_path: socket_path.to_owned(),
             state: server_state,
             connection_handler,
-            timeout: None,
             handlers: Default::default(),
         }
     }
@@ -81,19 +76,6 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
     pub fn register_handler(&mut self, request_type: &str, handler: Box<Handler<Cs>>) {
         self.handlers
             .insert(request_type.to_owned(), HandlerEnum::Concurrent(handler));
-    }
-
-    /// Register a function to be called when a request hasn't been received
-    /// recently.
-    /// XXX This shouldn't really be necessary.  Once the kernel sends "flush
-    /// writes" properly (when zio_wait() is called), we should be able to get
-    /// rid of this.
-    pub fn register_timeout_handler(
-        &mut self,
-        timeout: Duration,
-        handler: Box<TimeoutHandler<Cs>>,
-    ) {
-        self.timeout = Some((timeout, handler));
     }
 
     /// Register a function to be called for a "serial" operation.  The server
@@ -185,20 +167,7 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
                 // an async (spawned) task produced an error
                 return Err(e.unwrap());
             }
-            let nvl = match &server.timeout {
-                Some((duration, timeout_handler)) => {
-                    match tokio::time::timeout(*duration, Self::get_next_request(&mut input)).await
-                    {
-                        Ok(result) => result,
-                        Err(_) => {
-                            // timed out.
-                            timeout_handler(&mut state);
-                            continue;
-                        }
-                    }
-                }
-                None => Self::get_next_request(&mut input).await,
-            }?;
+            let nvl = Self::get_next_request(&mut input).await?;
 
             let request_type_cstr = nvl.lookup_string("Type")?;
             let request_type = request_type_cstr.to_str()?;

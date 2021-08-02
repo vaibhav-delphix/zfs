@@ -980,10 +980,7 @@ impl Pool {
     // start writing that pending object immediately.
     pub fn initiate_flush(&self, block: BlockId) {
         self.state.with_syncing_state(|syncing_state| {
-            // XXX because called when server times out waiting for request
-            if syncing_state.syncing_txg.is_none() {
-                return;
-            }
+            trace!("flushing block {}", block);
             if !syncing_state.pending_object.is_pending() {
                 return;
             }
