@@ -914,6 +914,7 @@ typedef enum vdev_aux {
 	VDEV_AUX_ACTIVE,	/* vdev active on a different host	*/
 	VDEV_AUX_CHILDREN_OFFLINE, /* all children are offline		*/
 	VDEV_AUX_ASHIFT_TOO_BIG, /* vdev's min block size is too large   */
+	VDEV_AUX_MODIFIED,	/* vdev was modified externally while in use */
 } vdev_aux_t;
 
 /*

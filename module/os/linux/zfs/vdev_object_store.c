@@ -658,12 +658,36 @@ agent_flush_writes(vdev_object_store_t *vos, uint64_t blockid)
 	fnvlist_free(nv);
 }
 
+static int
+agent_resume_state_check(vdev_t *vd)
+{
+	vdev_object_store_t *vos = vd->vdev_tsd;
+
+	if (bcmp(&vd->vdev_spa->spa_ubsync, &vos->vos_uberblock,
+	    sizeof (uberblock_t)) == 0) {
+		return (0);
+	}
+	if (vos->vos_send_txg_selector == VOS_TXG_END) {
+		/*
+		 * In this case, it's possible that the uberblock was written
+		 * out before we got the end txg done message. We can safely
+		 * continue.
+		 */
+		if (bcmp(&vd->vdev_spa->spa_uberblock, &vos->vos_uberblock,
+		    sizeof (uberblock_t)) == 0) {
+			return (0);
+		}
+	}
+	return (SET_ERROR(EBUSY));
+}
+
 static void
 agent_resume(void *arg)
 {
 	vdev_t *vd = arg;
 	vdev_object_store_t *vos = vd->vdev_tsd;
 	spa_t *spa = vd->vdev_spa;
+	int ret;
 
 	zfs_dbgmsg("agent_resume running");
 
@@ -683,6 +707,14 @@ agent_resume(void *arg)
 	}
 	VERIFY0(agent_open_pool(vd, vos,
 	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa))));
+
+	if ((ret = agent_resume_state_check(vd)) != 0) {
+		zfs_dbgmsg("agent resume failed, uberblock changed");
+		vdev_set_state(vd, B_FALSE, VDEV_STATE_CANT_OPEN,
+		    VDEV_AUX_MODIFIED);
+		vos->vos_agent_thread_exit = B_TRUE;
+		return;
+	}
 
 	mutex_enter(&vos->vos_sock_lock);
 
@@ -708,9 +740,10 @@ agent_resume(void *arg)
 		fnvlist_add_uint64(nv, AGENT_TOKEN, (uint64_t)zio);
 		zfs_dbgmsg("ZIO REISSUE (%px) req %llu",
 		    zio, (u_longlong_t)req);
-		if (agent_request(vos, nv, FTAG) != 0) {
-			zfs_dbgmsg("agent_resume failed");
+		if ((ret = agent_request(vos, nv, FTAG)) != 0) {
+			zfs_dbgmsg("agent_resume failed: %d", ret);
 			agent_io_block_free(nv);
+			vos->vos_agent_thread_exit = B_TRUE;
 			mutex_exit(&vq->vq_lock);
 			mutex_exit(&vos->vos_sock_lock);
 			return;
@@ -1020,6 +1053,7 @@ agent_reader(void *arg)
 		fnvlist_free(nv);
 		zio_delay_interrupt(zio);
 	} else if (strcmp(type, "pool close done") == 0) {
+		zfs_dbgmsg("got pool close done");
 		mutex_enter(&vos->vos_outstanding_lock);
 		ASSERT(!vos->vos_serial_done[VOS_SERIAL_CLOSE_POOL]);
 		vos->vos_serial_done[VOS_SERIAL_CLOSE_POOL] = B_TRUE;
@@ -1079,7 +1113,6 @@ vdev_agent_thread(void *arg)
 		int err = agent_reader(vos);
 		if (vos->vos_agent_thread_exit || err == 0)
 			continue;
-
 
 		/*
 		 * The agent has crashed so we need to start recovery.

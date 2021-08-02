@@ -35,11 +35,14 @@ impl KernelServerState {
         }
     }
 
-    pub fn start(socket_dir: &str, cache: Option<ZettaCache>, id: Uuid) {
+    pub fn start(socket_dir: &str, cache: Option<ZettaCache>) {
         let socket_path = format!("{}/zfs_kernel_socket", socket_dir);
         let mut server = Server::new(
             &socket_path,
-            KernelServerState { cache, id },
+            KernelServerState {
+                cache,
+                id: Uuid::new_v4(),
+            },
             Box::new(Self::connection_handler),
         );
 

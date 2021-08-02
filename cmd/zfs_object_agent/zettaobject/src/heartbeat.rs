@@ -137,10 +137,7 @@ pub async fn start_heartbeat(object_access: ObjectAccess, id: Uuid) -> Heartbeat
     let mut rx = rx_opt.unwrap();
     let tx = tx_opt.unwrap();
     tokio::spawn(async move {
-        let mut last_heartbeat = HeartbeatPhys::get(&object_access, id).await.ok();
-        if lease_timed_out(&last_heartbeat) {
-            panic!("Suspending pools due to lease timeout");
-        }
+        let mut last_heartbeat = None;
         info!("Starting heartbeat with id {}", id);
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         loop {
