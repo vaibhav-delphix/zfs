@@ -2,11 +2,13 @@ lib_LTLIBRARIES = libzoa.la
 
 sbin_PROGRAMS = zfs_object_agent zoa_test
 
-zfs_object_agent_SOURCES = $(wildcard server/src/*.rs src/*.rs Cargo.lock Cargo.toml server/Cargo.toml)
+common_sources = $(wildcard zettacache/src/*.rs zettacache/Cargo.toml zettaobject/src/*.rs zettaobject/Cargo.toml Cargo.lock Cargo.toml)
 
-zoa_test_SOURCES = $(wildcard client/src/*.rs src/*.rs Cargo.lock Cargo.toml client/Cargo.toml)
+zfs_object_agent_SOURCES = $(wildcard server/src/*.rs server/Cargo.toml) $(common_sources)
 
-libzoa_la_SOURCES = $(wildcard zoa/src/*.rs src/*.rs Cargo.lock Cargo.toml zoa/Cargo.toml)
+zoa_test_SOURCES = $(wildcard client/src/*.rs client/Cargo.toml) $(common_sources)
+
+libzoa_la_SOURCES = $(wildcard zoa/src/*.rs zoa/Cargo.toml) $(common_sources)
 
 RUSTFLAGS = \
 	-L $(abs_top_builddir)/lib/libzfs/.libs \
