@@ -38,12 +38,14 @@ use zettacache::ZettaCache;
 // XXX need a real tunables infrastructure.  Probably should use toml.
 // start freeing when the pending frees are this % of the entire pool
 const FREE_HIGHWATER_PCT: f64 = 10.0;
-// stop freeing when the pending frees are this % of the entire pool
-const FREE_LOWWATER_PCT: f64 = 9.0;
+// stop freeing when the pending frees are this % of the free log
+const FREE_LOWWATER_PCT: f64 = 40.0;
 // don't bother freeing unless there are at least this number of free blocks
 const FREE_MIN_BLOCKS: u64 = 1000;
 const MAX_BYTES_PER_OBJECT: u32 = 1024 * 1024;
 const ONE_MIB: u64 = 1_048_576;
+
+const PENDING_FREE_LOG_COUNT: u64 = 100;
 
 // minimum number of chunks before we consider condensing
 const LOG_CONDENSE_MIN_CHUNKS: usize = 30;
@@ -120,7 +122,7 @@ pub struct UberblockPhys {
     txg: Txg,         // redundant with key, for verification
     date: SystemTime, // for debugging
     storage_object_log: ObjectBasedLogPhys,
-    pending_frees_log: ObjectBasedLogPhys,
+    pending_frees_log: Vec<ObjectBasedLogPhys>, // list of logs, initially 100
     object_size_log: ObjectBasedLogPhys,
     next_block: BlockId, // next BlockID that can be allocated
     stats: PoolStatsPhys,
@@ -359,7 +361,9 @@ struct PoolSyncingState {
 
     // Note: the pending_frees_log may contain frees that were already applied,
     // if we crashed while processing pending frees.
-    pending_frees_log: ObjectBasedLog<PendingFreesLogEntry>,
+
+    // There are multiple pending-frees logs, initially set at 100 logs
+    pending_frees_log: Vec<ObjectBasedLog<PendingFreesLogEntry>>,
 
     pending_object: PendingObjectState,
     pending_unordered_writes: HashMap<BlockId, (ByteBuf, oneshot::Sender<()>)>,
@@ -446,12 +450,30 @@ impl PoolSyncingState {
         self.pending_object.next_block()
     }
 
-    fn log_free(&mut self, ent: PendingFreesLogEntry) {
+    fn log_free(&mut self, ent: PendingFreesLogEntry, object_block_map: &ObjectBlockMap) {
         let txg = self.syncing_txg.unwrap();
         assert_lt!(ent.block, self.next_block());
-        self.pending_frees_log.append(txg, ent);
+
+        // Pick which log to use for this entry
+        // - we want all the freed blocks from the same object to land in the same log
+        // - aim for 100,000 objects per log which is roughly 32 million blocks per log
+        // XXX for now substitute 1,000 for 100,000 to better exercise the logs
+        let nlogs = self.pending_frees_log.len() as u64;
+        let log =
+            FreeLogId(((object_block_map.block_to_object(ent.block).0 / 1000) % nlogs) as usize);
+        assert_lt!(log.0, PENDING_FREE_LOG_COUNT as usize);
+
+        self.get_free_log(log).append(txg, ent);
+    }
+
+    /// account for a new free entry
+    fn log_free_account(&mut self, ent: PendingFreesLogEntry) {
         self.stats.pending_frees_count += 1;
         self.stats.pending_frees_bytes += ent.size as u64;
+    }
+
+    fn get_free_log(&mut self, log: FreeLogId) -> &mut ObjectBasedLog<PendingFreesLogEntry> {
+        &mut self.pending_frees_log[log.0]
     }
 }
 
@@ -514,7 +536,14 @@ impl Pool {
             &phys.storage_object_log,
         );
         let object_block_map = ObjectBlockMap::load(&storage_object_log, phys.next_block).await;
-
+        let mut logs = Vec::new();
+        for (i, log) in phys.pending_frees_log.iter().enumerate() {
+            logs.push(ObjectBasedLog::open_by_phys(
+                shared_state.clone(),
+                &format!("zfs/{}/PendingFreesLog/{}", pool_phys.guid, i),
+                &log,
+            ));
+        }
         let pool = Pool {
             state: Arc::new(PoolState {
                 shared_state: shared_state.clone(),
@@ -527,11 +556,7 @@ impl Pool {
                         &format!("zfs/{}/ObjectSizeLog", pool_phys.guid),
                         &phys.object_size_log,
                     ),
-                    pending_frees_log: ObjectBasedLog::open_by_phys(
-                        shared_state.clone(),
-                        &format!("zfs/{}/PendingFreesLog", pool_phys.guid),
-                        &phys.pending_frees_log,
-                    ),
+                    pending_frees_log: logs,
                     pending_object: PendingObjectState::NotPending(phys.next_block),
                     pending_unordered_writes: HashMap::new(),
                     stats: phys.stats,
@@ -553,7 +578,10 @@ impl Pool {
 
         syncing_state.storage_object_log.recover().await;
         syncing_state.object_size_log.recover().await;
-        syncing_state.pending_frees_log.recover().await;
+        for log in syncing_state.pending_frees_log.iter_mut() {
+            // XXX can these be done in parallel?
+            log.recover().await;
+        }
 
         assert_eq!(
             pool.state.object_block_map.len() as u64,
@@ -588,6 +616,15 @@ impl Pool {
             );
             let object_block_map = ObjectBlockMap::load(&storage_object_log, BlockId(0)).await;
 
+            // Start with 100 logs, each capable of 32 million entries
+            let mut logs = Vec::new();
+            for i in 0..PENDING_FREE_LOG_COUNT {
+                // Note: right side is exclusive
+                logs.push(ObjectBasedLog::create(
+                    shared_state.clone(),
+                    &format!("zfs/{}/PendingFreesLog/{}", guid, i as usize),
+                ));
+            }
             let mut pool = Pool {
                 state: Arc::new(PoolState {
                     shared_state: shared_state.clone(),
@@ -599,10 +636,7 @@ impl Pool {
                             shared_state.clone(),
                             &format!("zfs/{}/ObjectSizeLog", guid),
                         ),
-                        pending_frees_log: ObjectBasedLog::create(
-                            shared_state.clone(),
-                            &format!("zfs/{}/PendingFreesLog", guid),
-                        ),
+                        pending_frees_log: logs,
                         pending_object: PendingObjectState::NotPending(BlockId(0)),
                         pending_unordered_writes: Default::default(),
                         stats: Default::default(),
@@ -875,13 +909,21 @@ impl Pool {
             }
         }
 
-        future::join3(
+        // XXX wait for them all at once
+        for log in syncing_state.pending_frees_log.iter_mut() {
+            log.flush(txg).await;
+        }
+
+        future::join(
             syncing_state.storage_object_log.flush(txg),
             syncing_state.object_size_log.flush(txg),
-            syncing_state.pending_frees_log.flush(txg),
         )
         .await;
 
+        let mut logs = Vec::new();
+        for log in syncing_state.pending_frees_log.iter() {
+            logs.push(log.to_phys());
+        }
         // write uberblock
         let u = UberblockPhys {
             guid: state.shared_state.guid,
@@ -889,7 +931,7 @@ impl Pool {
             date: SystemTime::now(),
             storage_object_log: syncing_state.storage_object_log.to_phys(),
             object_size_log: syncing_state.object_size_log.to_phys(),
-            pending_frees_log: syncing_state.pending_frees_log.to_phys(),
+            pending_frees_log: logs,
             next_block: syncing_state.next_block(),
             zfs_uberblock: TerseVec(uberblock),
             stats: syncing_state.stats,
@@ -936,7 +978,7 @@ impl Pool {
             }
             if len != 0 {
                 info!(
-                    "deleted {} objects in {}ms",
+                    "reclaim: deleted {} objects in {}ms",
                     len,
                     begin.elapsed().as_millis()
                 );
@@ -1225,7 +1267,11 @@ impl Pool {
         // function while in the middle of an end_txg(), so the lock must not be
         // held. XXX change this to return an error to the client
         self.state.with_syncing_state(|syncing_state| {
-            syncing_state.log_free(PendingFreesLogEntry { block, size });
+            syncing_state.log_free(
+                PendingFreesLogEntry { block, size },
+                &self.state.object_block_map,
+            );
+            syncing_state.log_free_account(PendingFreesLogEntry { block, size });
         })
     }
 
@@ -1395,11 +1441,13 @@ fn log_deleted_objects(
         begin.elapsed().as_millis()
     );
 }
-
+/// builds a new pending frees log base off the remainder from reclaiming
 async fn build_new_frees<'a, I>(
     syncing_state: &mut PoolSyncingState,
     remaining_frees: I,
     remainder: ObjectBasedLogRemainder,
+    state: &PoolState,
+    log: FreeLogId,
 ) where
     I: IntoIterator<Item = &'a PendingFreesLogEntry>,
 {
@@ -1409,30 +1457,30 @@ async fn build_new_frees<'a, I>(
     // We need to call .iterate_after() before .clear(), otherwise we'd be
     // iterating the new, empty generation.
     let stream = syncing_state
-        .pending_frees_log
+        .get_free_log(log)
         .iter_remainder(txg, remainder)
         .await;
-    syncing_state.pending_frees_log.clear(txg).await;
+    syncing_state.get_free_log(log).clear(txg).await;
 
-    syncing_state.stats.pending_frees_count = 0;
-    syncing_state.stats.pending_frees_bytes = 0;
     for ent in remaining_frees {
-        syncing_state.log_free(*ent);
+        syncing_state.log_free(*ent, &state.object_block_map);
     }
     stream
         .for_each(|ent| {
-            syncing_state.log_free(ent);
+            syncing_state.log_free(ent, &state.object_block_map);
             future::ready(())
         })
         .await;
     // Note: the caller (end_txg_cb()) is about to call flush(), but doing it
     // here ensures that the time to PUT these objects is accounted for in the
     // info!() below.
-    syncing_state.pending_frees_log.flush(txg).await;
+    syncing_state.get_free_log(log).flush(txg).await;
+
     info!(
-        "reclaim: {:?} transferred {} freed blocks in {}ms",
+        "reclaim: {:?} transferred {} freed blocks ({}MiB) in {}ms",
         txg,
         syncing_state.stats.pending_frees_count,
+        syncing_state.stats.pending_frees_bytes / ONE_MIB,
         begin.elapsed().as_millis()
     );
 }
@@ -1469,10 +1517,12 @@ async fn get_object_sizes(
     object_sizes
 }
 
+/// returns (free_bytes, map), where free_bytes is the number of free bytes
+/// in the log, and map lists the frees associated with each object.
 async fn get_frees_per_obj(
     state: &PoolState,
     pending_frees_log_stream: impl Stream<Item = PendingFreesLogEntry>,
-) -> HashMap<ObjectId, Vec<PendingFreesLogEntry>> {
+) -> (u64, HashMap<ObjectId, Vec<PendingFreesLogEntry>>) {
     // XXX The Vecs will grow by doubling, thus wasting ~1/4 of the
     // memory used by it.  It would be better if we gathered the
     // BlockID's into a single big Vec with the exact required size,
@@ -1480,6 +1530,7 @@ async fn get_frees_per_obj(
     // big Vec.
     let mut frees_per_obj: HashMap<ObjectId, Vec<PendingFreesLogEntry>> = HashMap::new();
     let mut count: u64 = 0;
+    let mut freed_bytes: u64 = 0;
     let begin = Instant::now();
     pending_frees_log_stream
         .for_each(|ent| {
@@ -1488,6 +1539,7 @@ async fn get_frees_per_obj(
             assert!(!frees_per_obj.entry(obj).or_default().contains(&ent));
             frees_per_obj.entry(obj).or_default().push(ent);
             count += 1;
+            freed_bytes += ent.size as u64;
             future::ready(())
         })
         .await;
@@ -1496,7 +1548,7 @@ async fn get_frees_per_obj(
         count,
         begin.elapsed().as_millis()
     );
-    frees_per_obj
+    (freed_bytes, frees_per_obj)
 }
 
 async fn reclaim_frees_object(
@@ -1653,6 +1705,8 @@ async fn reclaim_frees_object(
     (new_phys.object, new_phys.blocks_size)
 }
 
+/// reclaim free blocks from one of our pending-free logs
+/// processes the log with the most space freed
 fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState) {
     if syncing_state.reclaim_done.is_some() {
         return;
@@ -1676,19 +1730,46 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
     // Note: the object size stream may or may not include entries added this
     // txg.  Fortunately, the frees stream can't have any frees within object
     // created this txg, so this is not a problem.
-    let (pending_frees_log_stream, frees_remainder) = syncing_state.pending_frees_log.iter_most();
+
+    // XXX Load the log with the most space freed
+    // for now just use the one with the most entries
+
+    // XXX This can simplified even further with reduce() when we move to a more recent version of Rust
+    let best_log = FreeLogId(
+        syncing_state
+            .pending_frees_log
+            .iter()
+            .enumerate()
+            .fold((0, 0), |best, ent| {
+                if ent.1.num_entries >= best.1 {
+                    (ent.0, ent.1.num_entries)
+                } else {
+                    best
+                }
+            })
+            .0,
+    );
+
+    info!(
+        "reclaim: using {:?} with {} entries",
+        best_log,
+        syncing_state.get_free_log(best_log).num_entries
+    );
+
+    let (pending_frees_log_stream, frees_remainder) =
+        syncing_state.get_free_log(best_log).iter_most();
 
     let (object_size_log_stream, sizes_remainder) = syncing_state.object_size_log.iter_most();
-
-    let required_free_bytes = syncing_state.stats.pending_frees_bytes
-        - (syncing_state.stats.blocks_bytes as f64 * FREE_LOWWATER_PCT / 100f64) as u64;
 
     let (sender, receiver) = oneshot::channel();
     syncing_state.reclaim_done = Some(receiver);
 
     tokio::spawn(async move {
         // load pending frees
-        let mut frees_per_object = get_frees_per_obj(&state, pending_frees_log_stream).await;
+        let (freed_bytes, mut frees_per_object) =
+            get_frees_per_obj(&state, pending_frees_log_stream).await;
+
+        let required_free_bytes = (freed_bytes as f64 * FREE_LOWWATER_PCT / 100.0) as u64;
 
         // sort objects by number of free blocks
         // XXX should be based on free space (bytes)?  And perhaps objects that
@@ -1801,9 +1882,18 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
             Box::pin(async move {
                 syncing_state.stats.blocks_count -= freed_blocks_count;
                 syncing_state.stats.blocks_bytes -= freed_blocks_bytes;
+                syncing_state.stats.pending_frees_count -= freed_blocks_count;
+                syncing_state.stats.pending_frees_bytes -= freed_blocks_bytes;
 
                 let remaining_frees = frees_per_object.values().flatten();
-                build_new_frees(syncing_state, remaining_frees, frees_remainder).await;
+                build_new_frees(
+                    syncing_state,
+                    remaining_frees,
+                    frees_remainder,
+                    &state,
+                    best_log,
+                )
+                .await;
                 log_deleted_objects(state, syncing_state, deleted_objects);
                 try_condense_object_sizes(syncing_state, object_sizes, sizes_remainder).await;
                 log_new_sizes(syncing_state, rewritten_object_sizes);

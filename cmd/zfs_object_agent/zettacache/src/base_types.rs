@@ -92,3 +92,6 @@ impl Sub<Atime> for Atime {
         self.0 as usize - rhs.0 as usize
     }
 }
+
+#[derive(Serialize, Deserialize, Default, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+pub struct FreeLogId(pub usize);
