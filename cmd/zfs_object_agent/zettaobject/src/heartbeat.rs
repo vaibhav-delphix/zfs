@@ -1,7 +1,7 @@
 use crate::object_access::{OAError, ObjectAccess};
 use anyhow::Context;
 use lazy_static::lazy_static;
-use log::{debug, info};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -187,9 +187,17 @@ pub async fn start_heartbeat(object_access: ObjectAccess, id: Uuid) -> Heartbeat
 
 fn lease_timed_out(last_heartbeat: &Option<HeartbeatPhys>) -> bool {
     match last_heartbeat {
-        Some(heartbeat) => SystemTime::now()
-            .duration_since(heartbeat.timestamp)
-            .map_or(false, |d| d > heartbeat.lease_duration),
+        Some(heartbeat) => {
+            let since = SystemTime::now()
+                .duration_since(heartbeat.timestamp)
+                .unwrap_or(heartbeat.lease_duration);
+            if since > 2 * heartbeat.lease_duration / 3 {
+                warn!("Heartbeat delay: {:?}", since);
+            } else if since > heartbeat.lease_duration / 3 {
+                info!("Heartbeat delay: {:?}", since);
+            }
+            since >= heartbeat.lease_duration
+        }
         None => false,
     }
 }
