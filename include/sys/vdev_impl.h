@@ -647,7 +647,6 @@ uberblock_t *vdev_object_store_get_uberblock(vdev_t *vd);
 nvlist_t *vdev_object_store_get_config(vdev_t *vd);
 
 extern void vdev_queue_pending_add(vdev_queue_t *vq, zio_t *zio);
-extern void vdev_queue_pending_remove(vdev_queue_t *vq, zio_t *zio);
 
 /*
  * Vdev ashift optimization tunables

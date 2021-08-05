@@ -1463,6 +1463,10 @@ zio_vdev_child_io(zio_t *pio, blkptr_t *bp, vdev_t *vd, uint64_t offset,
 		offset += VDEV_LABEL_START_SIZE;
 	}
 
+	if (vd->vdev_ops->vdev_op_leaf && vdev_is_object_based(vd)) {
+		flags |= ZIO_FLAG_DONT_QUEUE;
+	}
+
 	flags |= ZIO_VDEV_CHILD_FLAGS(pio);
 
 	/*
@@ -3483,39 +3487,22 @@ zio_allocate_dispatch(spa_t *spa, int allocator)
 	zio_taskq_dispatch(zio, ZIO_TASKQ_ISSUE, B_TRUE);
 }
 
-static void
-object_store_child_done(zio_t *zio)
-{
-	zio_t *pio = zio->io_private;
-	pio->io_error = zio->io_error;
-}
-
 static zio_t *
-zio_object_allocate_and_issue(zio_t *zio)
+zio_object_allocate(zio_t *zio)
 {
 	spa_t *spa = zio->io_spa;
 	metaslab_class_t *mc = spa_normal_class(spa);
 	blkptr_t *bp = zio->io_bp;
 	int flags = 0;
 
-	flags |= (zio->io_flags & ZIO_FLAG_FASTWRITE) ? METASLAB_FASTWRITE : 0;
+	VERIFY0(zio->io_flags & ZIO_FLAG_FASTWRITE);
+	VERIFY0(zio->io_flags & ZIO_FLAG_GANG_CHILD);
 	if (zio->io_flags & ZIO_FLAG_NODATA)
 		flags |= METASLAB_DONT_THROTTLE;
-	if (zio->io_flags & ZIO_FLAG_GANG_CHILD)
-		flags |= METASLAB_GANG_CHILD;
 	if (zio->io_priority == ZIO_PRIORITY_ASYNC_WRITE)
 		flags |= METASLAB_ASYNC_ALLOC;
 
-	/*
-	 * For object allocation, we will issue the I/O directly
-	 * so remove that pipeline stage here.
-	 */
-	zio->io_pipeline &= ~ZIO_STAGE_VDEV_IO_START;
-
-	// Keep SCL_ZIO held until io_assess()
 	ASSERT(!(zio->io_flags & ZIO_FLAG_CONFIG_WRITER));
-	spa_config_enter(spa, SCL_ZIO, FTAG, RW_READER);
-
 	ASSERT3U(zio->io_prop.zp_copies, ==, 1);
 	int error = metaslab_alloc(spa, mc, zio->io_size, bp,
 	    zio->io_prop.zp_copies, zio->io_txg, NULL, flags,
@@ -3525,16 +3512,6 @@ zio_object_allocate_and_issue(zio_t *zio)
 	zfs_dbgmsg("zio=%px allocd %llu",
 	    zio, DVA_GET_OFFSET(&bp->blk_dva[0]));
 
-	zio_t *child = zio_vdev_child_io(zio, zio->io_bp,
-	    spa->spa_root_vdev->vdev_child[0],
-	    DVA_GET_OFFSET(&bp->blk_dva[0]),
-	    zio->io_abd, zio->io_size, zio->io_type, zio->io_priority,
-	    ZIO_FLAG_DONT_QUEUE,
-	    object_store_child_done, zio);
-	zio_nowait(child);
-
-	zfs_dbgmsg("zio=%px child=%px stage=%llu",
-	    zio, child, (u_longlong_t)child->io_stage);
 	return (zio);
 }
 
@@ -3548,7 +3525,7 @@ zio_dva_allocate(zio_t *zio)
 	int flags = 0;
 
 	if (!spa_normal_class(spa)->mc_ops->msop_block_based)
-		return (zio_object_allocate_and_issue(zio));
+		return (zio_object_allocate(zio));
 
 	if (zio->io_gang_leader == NULL) {
 		ASSERT(zio->io_child_type > ZIO_CHILD_GANG);
@@ -3928,11 +3905,9 @@ zio_vdev_io_start(zio_t *zio)
 		if (zio->io_type == ZIO_TYPE_READ && vdev_cache_read(zio))
 			return (zio);
 
-#if 0
 		if ((zio = vdev_queue_io(zio)) == NULL) {
 			return (NULL);
 		}
-#endif
 
 		if (!vdev_accessible(vd, zio)) {
 			zio->io_error = SET_ERROR(ENXIO);
@@ -3965,9 +3940,7 @@ zio_vdev_io_done(zio_t *zio)
 
 	if (vd != NULL && vd->vdev_ops->vdev_op_leaf &&
 	    vd->vdev_ops != &vdev_draid_spare_ops) {
-#if 0
 		vdev_queue_io_done(zio);
-#endif
 
 		if (zio->io_type == ZIO_TYPE_WRITE)
 			vdev_cache_write(zio);

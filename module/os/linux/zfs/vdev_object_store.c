@@ -379,8 +379,6 @@ agent_complete_zio(vdev_object_store_t *vos, uint64_t blockid)
 
 	vdev_object_store_request_t *vosr = zio->io_vsd;
 	VERIFY3U(vosr->vosr_req, ==, blockid);
-
-	vdev_queue_pending_remove(vq, zio);
 	mutex_exit(&vq->vq_lock);
 
 	return (zio);
