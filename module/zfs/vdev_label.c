@@ -1512,11 +1512,13 @@ vdev_uberblock_load_impl(zio_t *zio, vdev_t *vd, int flags,
 	for (int c = 0; c < vd->vdev_children; c++)
 		vdev_uberblock_load_impl(zio, vd->vdev_child[c], flags, cbp);
 
+	if (!vd->vdev_ops->vdev_op_leaf)
+		return;
+
 	if (vdev_is_object_based(vd)) {
 		uberblock_t *ub = vdev_object_store_get_uberblock(vd);
 		vdev_uberblock_load_done_impl(zio->io_spa, vd, ub, zio);
-	} else if (vd->vdev_ops->vdev_op_leaf && vdev_readable(vd) &&
-	    vd->vdev_ops != &vdev_draid_spare_ops) {
+	} else if (vdev_readable(vd) && vd->vdev_ops != &vdev_draid_spare_ops) {
 		for (int l = 0; l < VDEV_LABELS; l++) {
 			for (int n = 0; n < VDEV_UBERBLOCK_COUNT(vd); n++) {
 				vdev_label_read(zio, vd, l,

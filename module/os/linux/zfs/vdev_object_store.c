@@ -1436,6 +1436,7 @@ vdev_object_store_metaslab_init(vdev_t *vd, metaslab_t *msp, uint64_t *ms_start,
 uberblock_t *
 vdev_object_store_get_uberblock(vdev_t *vd)
 {
+	ASSERT(vdev_is_object_based(vd) && vd->vdev_ops->vdev_op_leaf);
 	vdev_object_store_t *vos = vd->vdev_tsd;
 	return (&vos->vos_uberblock);
 }
