@@ -291,8 +291,8 @@ impl BlockAccess {
         };
 
         let struct_obj: T = match header.encoding {
-            EncodeType::Json => serde_json::from_slice(&serde_slice)?,
-            EncodeType::Bincode => Self::bincode_options().deserialize(&serde_slice)?,
+            EncodeType::Json => serde_json::from_slice(serde_slice)?,
+            EncodeType::Bincode => Self::bincode_options().deserialize(serde_slice)?,
         };
         Ok((
             struct_obj,

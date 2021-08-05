@@ -546,7 +546,7 @@ impl Pool {
             logs.push(ObjectBasedLog::open_by_phys(
                 shared_state.clone(),
                 &format!("zfs/{}/PendingFreesLog/{}", pool_phys.guid, i),
-                &log,
+                log,
             ));
         }
         let pool = Pool {
@@ -2037,7 +2037,7 @@ fn peekable_next_if<I: Iterator>(
     func: impl FnOnce(&I::Item) -> bool,
 ) -> Option<I::Item> {
     match this.peek() {
-        Some(matched) if func(&matched) => this.next(),
+        Some(matched) if func(matched) => this.next(),
         _ => None,
     }
 }

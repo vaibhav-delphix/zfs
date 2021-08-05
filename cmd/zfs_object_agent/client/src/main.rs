@@ -171,7 +171,7 @@ async fn do_create() -> Result<(), Box<dyn Error>> {
     let guid = PoolGuid(POOL_GUID);
 
     client
-        .create_pool(&region, &endpoint, &bucket_name, guid, &pool_name)
+        .create_pool(region, endpoint, bucket_name, guid, pool_name)
         .await;
     client.get_next_response().await;
 
@@ -219,9 +219,7 @@ async fn setup_client(guid: PoolGuid) -> (Client, Txg, BlockId) {
     let endpoint = ENDPOINT;
     let region = REGION;
 
-    client
-        .open_pool(&region, endpoint, &bucket_name, guid)
-        .await;
+    client.open_pool(region, endpoint, bucket_name, guid).await;
 
     let nvl = client.get_next_response().await;
     let txg = Txg(nvl.lookup_uint64("next txg").unwrap());
@@ -341,7 +339,7 @@ async fn print_super(
     let guid_str: &str = split[1];
     if let Ok(guid64) = str::parse::<u64>(guid_str) {
         let guid = PoolGuid(guid64);
-        match Pool::get_config(&object_access, guid).await {
+        match Pool::get_config(object_access, guid).await {
             Ok(pool_config) => {
                 let name = pool_config.lookup_string("name").unwrap();
                 let hostname = pool_config.lookup_string("hostname").unwrap();
@@ -397,7 +395,7 @@ async fn find_old_pools(object_access: &ObjectAccess, min_age: Duration) -> Vec<
             Some(output) => {
                 let mod_time =
                     DateTime::parse_from_rfc2822(output.last_modified.as_ref().unwrap()).unwrap();
-                print_super(&object_access, &pool_key, &mod_time).await;
+                print_super(object_access, &pool_key, &mod_time).await;
                 if has_expired(&mod_time, min_age) {
                     vec.push(strip_prefix(&pool_key).to_string());
                 } else {
@@ -444,7 +442,7 @@ async fn do_destroy_old_pools(
                 .delete_objects(
                     &chunk
                         .iter()
-                        .map(|o| strip_prefix(&o).to_string())
+                        .map(|o| strip_prefix(o).to_string())
                         .collect::<Vec<_>>(),
                 )
                 .await;
