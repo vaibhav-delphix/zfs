@@ -1459,7 +1459,7 @@ async fn build_new_frees<'a, I>(
     let txg = syncing_state.syncing_txg.unwrap();
     let begin = Instant::now();
 
-    // We need to call .iterate_after() before .clear(), otherwise we'd be
+    // We need to call .iter_remainder() before .clear(), otherwise we'd be
     // iterating the new, empty generation.
     let stream = syncing_state
         .get_free_log(log)
@@ -1467,12 +1467,19 @@ async fn build_new_frees<'a, I>(
         .await;
     syncing_state.get_free_log(log).clear(txg).await;
 
+    // XXX when each free log has its own stats, we can use that instead of tracking it here.
+    let mut count: u64 = 0;
+    let mut bytes: u64 = 0;
     for ent in remaining_frees {
         syncing_state.log_free(*ent, &state.object_block_map);
+        count += 1;
+        bytes += ent.size as u64;
     }
     stream
         .for_each(|ent| {
             syncing_state.log_free(ent, &state.object_block_map);
+            count += 1;
+            bytes += ent.size as u64;
             future::ready(())
         })
         .await;
@@ -1484,8 +1491,8 @@ async fn build_new_frees<'a, I>(
     info!(
         "reclaim: {:?} transferred {} freed blocks ({}MiB) in {}ms",
         txg,
-        syncing_state.stats.pending_frees_count,
-        syncing_state.stats.pending_frees_bytes / ONE_MIB,
+        count,
+        bytes / ONE_MIB,
         begin.elapsed().as_millis()
     );
 }
