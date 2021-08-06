@@ -54,3 +54,50 @@ tags = ['functional', 'acl', 'posix-sa']
 #     'checkpoint_vdev_add', 'checkpoint_zdb', 'checkpoint_zhack_feat']
 # tags = ['functional', 'pool_checkpoint']
 # timeout = 1800
+[tests/functional/chattr]
+tests = ['chattr_001_pos', 'chattr_002_neg']
+tags = ['functional', 'chattr']
+
+[tests/functional/cp_files]
+tests = ['cp_files_001_pos']
+tags = ['functional', 'cp_files']
+
+[tests/functional/atime]
+tests = ['atime_001_pos', 'atime_002_neg', 'atime_003_pos',
+   'root_atime_off', 'root_atime_on', 'root_relatime_on']
+tags = ['functional', 'atime']
+
+[tests/functional/ctime]
+tests = ['ctime_001_pos']
+tags = ['functional', 'ctime']
+
+[tests/functional/exec]
+tests = ['exec_001_pos', 'exec_002_neg']
+tags = ['functional', 'exec']
+
+[tests/functional/fallocate]
+tests = ['fallocate_prealloc', 'fallocate_punch-hole']
+tags = ['functional', 'fallocate']
+
+[tests/functional/mount]
+tests = ['umount_001', 'umountall_001', 'umount_unlinked_drain']
+tags = ['functional', 'mount']
+
+[tests/functional/suid]
+tests = ['suid_write_to_none', 'suid_write_to_sgid',
+	'suid_write_to_suid', 'suid_write_to_suid_sgid']
+tags = ['functional', 'suid']
+
+[tests/functional/cli_root/zfs]
+tests = ['zfs_001_neg', 'zfs_002_pos', 'zfs_003_neg']
+tags = ['functional', 'cli_root', 'zfs']
+
+[tests/functional/cli_root/zfs_bookmark]
+tests = ['zfs_bookmark_cliargs']
+tags = ['functional', 'cli_root', 'zfs_bookmark']
+
+[tests/functional/cli_root/zfs_change-key]
+tests = ['zfs_change-key.ksh', 'zfs_change-key_child.ksh', 'zfs_change-key_clones.ksh',
+	'zfs_change-key_format.ksh', 'zfs_change-key_inherit.ksh', 'zfs_change-key_load.ksh',
+	'zfs_change-key_location.ksh', 'zfs_change-key_pbkdf2iters.ksh']
+tags = ['functional', 'cli_root', 'zfs_change-key']

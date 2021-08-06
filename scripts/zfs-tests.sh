@@ -609,6 +609,7 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 	fi
 	sudo -E /sbin/zfs_object_agent -vv \
 	    --output-file=$ZOA_LOG >/dev/null 2>&1 &
+	ZOA_PID=$!
 
 	# Verify connectivity before proceeding
 	/sbin/zoa_test -p "$ZTS_CREDS_PROFILE" -b "$ZTS_BUCKET_NAME" \
@@ -743,4 +744,8 @@ if [ -n "$SINGLETEST" ]; then
 	rm -f "$RUNFILES" >/dev/null 2>&1
 fi
 
+# Cleanup zfs_object_agent process
+if [ -n "$ZOA_PID" ]; then
+	sudo kill $ZOA_PID >/dev/null 2>&1
+fi
 exit ${RESULT}
