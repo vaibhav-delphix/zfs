@@ -693,15 +693,19 @@ agent_resume(void *arg)
 	vdev_queue_t *vq = &vd->vdev_queue;
 
 	mutex_enter(&vq->vq_lock);
-	if (vos->vos_send_txg_selector == VOS_TXG_END) {
-		VERIFY(avl_is_empty(&vq->vq_active_tree));
-	}
-
 	for (zio_t *zio = avl_first(&vq->vq_active_tree); zio != NULL;
 	    zio = AVL_NEXT(&vq->vq_active_tree, zio)) {
 		uint64_t req = zio->io_offset >> SPA_MINBLOCKSHIFT;
 		vdev_object_store_request_t *vosr = zio->io_vsd;
 		VERIFY3U(vosr->vosr_req, ==, req);
+
+		/*
+		 * If we're at END state then we shouldn't have
+		 * any outstanding writes in the queue.
+		 */
+		if (vos->vos_send_txg_selector == VOS_TXG_END) {
+			VERIFY3U(zio->io_type, !=, ZIO_TYPE_WRITE);
+		}
 
 		nvlist_t *nv = agent_io_block_alloc(zio);
 		fnvlist_add_uint64(nv, AGENT_REQUEST_ID, req);
@@ -1093,7 +1097,6 @@ vdev_agent_thread(void *arg)
 		 */
 
 
-		ASSERT3U(vd->vdev_state, ==, VDEV_STATE_HEALTHY);
 		ASSERT3U(err, ==, EAGAIN);
 		zfs_dbgmsg("(%px) agent_reader exited, reopen", curthread);
 
