@@ -304,31 +304,6 @@ agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 	return (sent == total_size ? 0 : SET_ERROR(EINTR));
 }
 
-static zio_t *
-agent_request_search(vdev_queue_t *vq, uint64_t blockid)
-{
-	ASSERT(MUTEX_HELD(&vq->vq_lock));
-
-	/*
-	 * We search in the active avl tree for the offset associated
-	 * with the request. We must set ZIO_CONTROL_OFFSET_MATCH since
-	 * the avl comparison function not only looks at offset but
-	 * also the zio_t pointer. By setting the ZIO_CONTROL_OFFSET_MATCH
-	 * flag, we return back the first zio_t which matches only the
-	 * offset value.
-	 *
-	 * XXX - This is safe since we can only have one active I/O to
-	 * a given blockid (see command in agent_request_zio for more
-	 * info).
-	 */
-	vq->vq_io_search.io_offset = blockid << SPA_MINBLOCKSHIFT;
-	vq->vq_io_search.io_control_flags |= ZIO_CONTROL_OFFSET_MATCH;
-
-	zio_t *zio = avl_find(&vq->vq_active_tree, &vq->vq_io_search, NULL);
-	vq->vq_io_search.io_control_flags &= ~ZIO_CONTROL_OFFSET_MATCH;
-	return (zio);
-}
-
 /*
  * Send request to agent; nvlist may be modified.
  */
@@ -343,17 +318,6 @@ agent_request_zio(vdev_object_store_t *vos, zio_t *zio, nvlist_t *nv)
 	uint64_t blockid = zio->io_offset >> SPA_MINBLOCKSHIFT;
 
 	mutex_enter(&vq->vq_lock);
-
-	/*
-	 * XXX - we assume that only one I/O with a given offset exists
-	 * in the vdev_queue at any given time. Although this is true for
-	 * ARC based reads/writes, it is probably not true for scrubs
-	 * since they issue reads directly via zio_read. Once we make
-	 * scrub work correctly, we will need to use
-	 * something to differentiate between multiple I/Os which
-	 * are to the same offset.
-	 */
-	VERIFY3P(agent_request_search(vq, blockid), ==, NULL);
 	vdev_queue_pending_add(vq, zio);
 	mutex_exit(&vq->vq_lock);
 
@@ -367,15 +331,17 @@ agent_request_zio(vdev_object_store_t *vos, zio_t *zio, nvlist_t *nv)
 }
 
 static zio_t *
-agent_complete_zio(vdev_object_store_t *vos, uint64_t blockid)
+agent_complete_zio(vdev_object_store_t *vos, uint64_t blockid,
+    uintptr_t token)
 {
 	vdev_t *vd = vos->vos_vdev;
 	vdev_queue_t *vq = &vd->vdev_queue;
 
 	mutex_enter(&vq->vq_lock);
-	zio_t *zio = agent_request_search(vq, blockid);
+	zio_t *zio = avl_find(&vq->vq_active_tree, (zio_t *)token, NULL);
 	VERIFY3P(zio, !=, NULL);
-	ASSERT3P(zio->io_offset >> SPA_MINBLOCKSHIFT, ==, blockid);
+	VERIFY3P(zio, ==, token);
+	VERIFY3U(zio->io_offset >> SPA_MINBLOCKSHIFT, ==, blockid);
 
 	vdev_object_store_request_t *vosr = zio->io_vsd;
 	VERIFY3U(vosr->vosr_req, ==, blockid);
@@ -1029,8 +995,7 @@ agent_reader(void *arg)
 		    AGENT_DATA, &len);
 		zfs_dbgmsg("got read done req=%llu datalen=%u, token %px",
 		    (u_longlong_t)req, len, (zio_t *)token);
-		zio_t *zio = agent_complete_zio(vos, req);
-		VERIFY3P(token, ==, zio);
+		zio_t *zio = agent_complete_zio(vos, req, token);
 		VERIFY3U(fnvlist_lookup_uint64(nv, AGENT_BLKID), ==,
 		    zio->io_offset >> SPA_MINBLOCKSHIFT);
 		VERIFY3U(len, ==, zio->io_size);
@@ -1044,8 +1009,7 @@ agent_reader(void *arg)
 		uintptr_t token = fnvlist_lookup_uint64(nv, AGENT_TOKEN);
 		zfs_dbgmsg("got write done req=%llu, token %px",
 		    (u_longlong_t)req, (zio_t *)token);
-		zio_t *zio = agent_complete_zio(vos, req);
-		VERIFY3P(token, ==, zio);
+		zio_t *zio = agent_complete_zio(vos, req, token);
 		VERIFY3U(fnvlist_lookup_uint64(nv, AGENT_BLKID), ==,
 		    zio->io_offset >> SPA_MINBLOCKSHIFT);
 		fnvlist_free(nv);

@@ -236,6 +236,13 @@ int zfs_vdev_def_queue_depth = 32;
 int zfs_vdev_aggregate_trim = 0;
 
 static int
+vdev_queue_pointer_compare(const void *x1, const void *x2)
+{
+
+	return (TREE_PCMP(x1, x2));
+}
+
+static int
 vdev_queue_offset_compare(const void *x1, const void *x2)
 {
 	const zio_t *z1 = (const zio_t *)x1;
@@ -471,8 +478,13 @@ vdev_queue_init(vdev_t *vd)
 	vq->vq_vdev = vd;
 	taskq_init_ent(&vd->vdev_queue.vq_io_search.io_tqent);
 
-	avl_create(&vq->vq_active_tree, vdev_queue_offset_compare,
-	    sizeof (zio_t), offsetof(struct zio, io_queue_node));
+	if (vdev_is_object_based(vd)) {
+		avl_create(&vq->vq_active_tree, vdev_queue_pointer_compare,
+		    sizeof (zio_t), offsetof(struct zio, io_queue_node));
+	} else {
+		avl_create(&vq->vq_active_tree, vdev_queue_offset_compare,
+		    sizeof (zio_t), offsetof(struct zio, io_queue_node));
+	}
 	avl_create(vdev_queue_type_tree(vq, ZIO_TYPE_READ),
 	    vdev_queue_offset_compare, sizeof (zio_t),
 	    offsetof(struct zio, io_offset_node));
