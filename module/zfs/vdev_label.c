@@ -1517,6 +1517,7 @@ vdev_uberblock_load_impl(zio_t *zio, vdev_t *vd, int flags,
 
 	if (vdev_is_object_based(vd)) {
 		uberblock_t *ub = vdev_object_store_get_uberblock(vd);
+		ASSERT3P(ub, !=, NULL);
 		vdev_uberblock_load_done_impl(zio->io_spa, vd, ub, zio);
 	} else if (vdev_readable(vd) && vd->vdev_ops != &vdev_draid_spare_ops) {
 		for (int l = 0; l < VDEV_LABELS; l++) {

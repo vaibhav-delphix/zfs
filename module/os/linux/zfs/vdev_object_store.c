@@ -525,6 +525,10 @@ agent_open_pool(vdev_t *vd, vdev_object_store_t *vos, mode_t mode)
 	fnvlist_add_string(nv, AGENT_BUCKET, vd->vdev_path);
 	if (mode == O_RDONLY)
 		fnvlist_add_boolean(nv, AGENT_READONLY);
+	if (vd->vdev_spa->spa_load_max_txg != UINT64_MAX) {
+		fnvlist_add_uint64(nv, AGENT_TXG,
+		    vd->vdev_spa->spa_load_max_txg);
+	}
 	zfs_dbgmsg("agent_open_pool(guid=%llu bucket=%s)",
 	    (u_longlong_t)spa_guid(vd->vdev_spa),
 	    vd->vdev_path);

@@ -604,6 +604,7 @@ impl Pool {
     pub async fn open(
         object_access: &ObjectAccess,
         guid: PoolGuid,
+        txg: Option<Txg>,
         cache: Option<ZettaCache>,
         id: Uuid,
     ) -> Result<(Pool, Option<UberblockPhys>, BlockId), PoolOpenError> {
@@ -668,7 +669,7 @@ impl Pool {
             let (mut pool, ub, next_block) = Pool::open_from_txg(
                 object_access,
                 &phys,
-                phys.last_txg,
+                txg.unwrap_or(phys.last_txg),
                 cache,
                 if !object_access.readonly() {
                     Some(heartbeat::start_heartbeat(object_access.clone(), id).await)

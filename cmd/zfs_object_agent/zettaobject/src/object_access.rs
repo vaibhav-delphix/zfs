@@ -54,9 +54,18 @@ pub struct ObjectAccess {
     endpoint_str: String,
 }
 
-/// For testing, prefix all object keys with this string.
+/*
+ * For testing, prefix all object keys with this string. In cases where objects are returned from
+ * a call like list_objects and then fetched with get, we could end up doubling the prefix. We
+ * could either strip the prefix from the beginning of every object we return, or we can only
+ * prefix an object if it isn't already prefixed. We do the latter here, for conciseness, but in
+ * the future we may want to revisit this decision.
+ */
 pub fn prefixed(key: &str) -> String {
-    format!("{}{}", *PREFIX, key)
+    match key.starts_with(format!("{}zfs", *PREFIX).as_str()) {
+        true => key.to_string(),
+        false => format!("{}{}", *PREFIX, key),
+    }
 }
 
 #[derive(Debug)]

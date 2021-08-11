@@ -108,9 +108,10 @@ impl KernelConnectionState {
             let guid = PoolGuid(nvl.lookup_uint64("GUID")?);
             let object_access = Self::get_object_access(nvl.as_ref())?;
             let cache = self.cache.as_ref().cloned();
+            let txg = nvl.lookup_uint64("TXG").ok().map(Txg);
 
             let (pool, phys_opt, next_block) =
-                match Pool::open(&object_access, guid, cache, self.id).await {
+                match Pool::open(&object_access, guid, txg, cache, self.id).await {
                     Err(PoolOpenError::MmpError(hostname)) => {
                         let mut response = NvList::new_unique_names();
                         response.insert("Type", "pool open failed").unwrap();
