@@ -20,6 +20,7 @@ use more_asserts::*;
 use nvpair::NvList;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
+use std::borrow::Borrow;
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -175,17 +176,37 @@ impl OnDisk for DataObjectPhys {}
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 enum ObjectSizeLogEntry {
-    Exists {
-        object: ObjectId,
-        num_blocks: u32,
-        num_bytes: u32, // bytes in blocks; does not include Agent metadata
-    },
-    Freed {
-        object: ObjectId,
-    },
+    Exists(ObjectSize),
+    Freed { object: ObjectId },
 }
 impl OnDisk for ObjectSizeLogEntry {}
 impl ObjectBasedLogEntry for ObjectSizeLogEntry {}
+
+#[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ObjectSize {
+    object: ObjectId,
+    num_blocks: u32,
+    num_bytes: u32, // bytes in blocks; does not include Agent metadata
+}
+
+/// This lets us use an ObjectId to lookup in a Map/Set of ObjectSize's.  There
+/// must not be two ObjectSize structs that have the same ObjectID but different
+/// blocks/bytes (that are part of the same Map/Set).
+impl Borrow<ObjectId> for ObjectSize {
+    fn borrow(&self) -> &ObjectId {
+        &self.object
+    }
+}
+
+impl From<&DataObjectPhys> for ObjectSize {
+    fn from(phys: &DataObjectPhys) -> Self {
+        ObjectSize {
+            object: phys.object,
+            num_blocks: phys.blocks.len() as u32,
+            num_bytes: phys.blocks_size,
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq)]
 struct PendingFreesLogEntry {
@@ -279,11 +300,12 @@ impl DataObjectPhys {
         vec
     }
 
+    fn calculate_blocks_size(&self) -> u32 {
+        self.blocks.values().map(|buf| buf.len() as u32).sum()
+    }
+
     fn verify(&self) {
-        assert_eq!(
-            self.blocks_size as usize,
-            self.blocks.values().map(|x| x.len()).sum::<usize>()
-        );
+        assert_eq!(self.blocks_size, self.calculate_blocks_size());
         assert_le!(self.min_txg, self.max_txg);
         assert_le!(self.min_block, self.next_block);
         if !self.blocks.is_empty() {
@@ -1062,14 +1084,9 @@ impl Pool {
                 object,
             },
         );
-        syncing_state.object_size_log.append(
-            txg,
-            ObjectSizeLogEntry::Exists {
-                object,
-                num_blocks: phys.blocks.len() as u32,
-                num_bytes: phys.blocks_size,
-            },
-        );
+        syncing_state
+            .object_size_log
+            .append(txg, ObjectSizeLogEntry::Exists(phys.into()));
     }
 
     // completes when we've initiated the PUT to the object store.
@@ -1245,10 +1262,7 @@ impl Pool {
             .await
             .unwrap();
         // XXX consider using debug_assert_eq
-        assert_eq!(
-            phys.blocks_size as usize,
-            phys.blocks.values().map(|x| x.len()).sum::<usize>()
-        );
+        assert_eq!(phys.blocks_size, phys.calculate_blocks_size());
         if phys.blocks.get(&block).is_none() {
             //println!("{:#?}", self.objects);
             error!("{:#?}", phys);
@@ -1402,21 +1416,13 @@ impl Pool {
 // Following routines deal with reclaiming free space
 //
 
-fn log_new_sizes(
-    syncing_state: &mut PoolSyncingState,
-    rewritten_object_sizes: Vec<(ObjectId, u32)>,
-) {
+fn log_new_sizes(syncing_state: &mut PoolSyncingState, rewritten_object_sizes: Vec<ObjectSize>) {
     let txg = syncing_state.syncing_txg.unwrap();
-    for (object, size) in rewritten_object_sizes {
+    for object_size in rewritten_object_sizes {
         // log to on-disk size
-        syncing_state.object_size_log.append(
-            txg,
-            ObjectSizeLogEntry::Exists {
-                object,
-                num_blocks: 0, // XXX need num_blocks
-                num_bytes: size,
-            },
-        );
+        syncing_state
+            .object_size_log
+            .append(txg, ObjectSizeLogEntry::Exists(object_size));
     }
 }
 
@@ -1500,23 +1506,24 @@ async fn build_new_frees<'a, I>(
 
 async fn get_object_sizes(
     object_size_log_stream: impl Stream<Item = ObjectSizeLogEntry>,
-) -> BTreeMap<ObjectId, u32> {
-    let mut object_sizes: BTreeMap<ObjectId, u32> = BTreeMap::new();
+) -> BTreeSet<ObjectSize> {
+    let mut object_sizes = BTreeSet::new();
     let begin = Instant::now();
     object_size_log_stream
         .for_each(|ent| {
             match ent {
-                ObjectSizeLogEntry::Exists {
-                    object: obj,
-                    num_blocks: _,
-                    num_bytes,
-                } => {
-                    // overwrite existing value, if any
-                    object_sizes.insert(obj, num_bytes);
+                ObjectSizeLogEntry::Exists(object_size) => {
+                    // Overwrite existing value, if any.  We have to explicitly
+                    // remove it using the ObjectId so that we find any entry
+                    // that matches this ObjectId (even with a different
+                    // num_blocks/bytes).
+                    object_sizes.remove(&object_size.object);
+                    object_sizes.insert(object_size);
                 }
-                ObjectSizeLogEntry::Freed { object: obj } => {
+                ObjectSizeLogEntry::Freed { object } => {
+                    let removed = object_sizes.remove(&object);
                     // value must already exist
-                    object_sizes.remove(&obj).unwrap();
+                    assert!(removed);
                 }
             }
             future::ready(())
@@ -1566,22 +1573,23 @@ async fn get_frees_per_obj(
 
 async fn reclaim_frees_object(
     state: Arc<PoolState>,
-    objects: Vec<(ObjectId, u32, Vec<PendingFreesLogEntry>)>,
-) -> (ObjectId, u32) {
-    let first_object = objects[0].0;
+    objects: Vec<(ObjectSize, Vec<PendingFreesLogEntry>)>,
+) -> ObjectSize {
+    let first_object = objects[0].0.object;
     let shared_state = state.shared_state.clone();
     debug!(
         "reclaim: consolidating {} objects into {:?} to free {} blocks",
         objects.len(),
         first_object,
-        objects.iter().map(|x| x.2.len()).sum::<usize>()
+        objects.iter().map(|x| x.1.len()).sum::<usize>()
     );
 
     let stream = FuturesUnordered::new();
     let mut to_delete = Vec::new();
     let mut first = None;
-    for (object, new_object_size, frees) in objects {
+    for (object_size, frees) in objects {
         // All but the first object need to be deleted.
+        let object = object_size.object;
         match first {
             None => first = Some(object),
             Some(first_obj) => {
@@ -1631,32 +1639,18 @@ async fn reclaim_frees_object(
                 phys
                     .blocks
                     .retain(|block, _| block >= &min_block && block < &next_block);
-                assert_eq!(
-                    new_object_size,
-                    phys
-                        .blocks
-                        .iter()
-                        .map(|(_, data)| data.len() as u32)
-                        .sum::<u32>()
-                );
-                assert_ge!(phys.blocks_size, new_object_size);
-                phys.blocks_size = new_object_size;
+
+                assert_ge!(phys.blocks_size, object_size.num_bytes);
+                phys.blocks_size = object_size.num_bytes;
 
                 assert_le!(phys.min_block, min_block);
                 phys.min_block = min_block;
                 assert_ge!(phys.next_block, next_block);
                 phys.next_block = next_block;
-            } else {
-                assert_eq!(
-                    new_object_size,
-                    phys
-                        .blocks
-                        .iter()
-                        .map(|(_, data)| data.len() as u32)
-                        .sum::<u32>()
-                );
-                assert_eq!(phys.blocks_size, new_object_size);
             }
+            assert_eq!(phys.blocks_size, phys.calculate_blocks_size());
+            assert_eq!(phys.blocks_size, object_size.num_bytes);
+            assert_eq!(phys.blocks.len(), object_size.num_blocks as usize);
 
             phys
         }));
@@ -1715,7 +1709,7 @@ async fn reclaim_frees_object(
     // (because we already did it all before crashing)
     new_phys.put(&shared_state.object_access).await;
 
-    (new_phys.object, new_phys.blocks_size)
+    (&new_phys).into()
 }
 
 /// reclaim free blocks from one of our pending-free logs
@@ -1803,7 +1797,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
         let mut join_handles = Vec::new();
         let mut freed_blocks_count: u64 = 0;
         let mut freed_blocks_bytes: u64 = 0;
-        let mut rewritten_object_sizes: Vec<(ObjectId, u32)> = Vec::new();
+        let mut rewritten_object_sizes: Vec<ObjectSize> = Vec::new();
         let mut deleted_objects: Vec<ObjectId> = Vec::new();
         let mut writing: HashSet<ObjectId> = HashSet::new();
         let outstanding = Arc::new(tokio::sync::Semaphore::new(30));
@@ -1813,50 +1807,53 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
                 continue;
             }
             // XXX limit amount of outstanding get/put requests?
-            let mut objects_to_consolidate: Vec<(ObjectId, u32, Vec<PendingFreesLogEntry>)> =
+            let mut objects_to_consolidate: Vec<(ObjectSize, Vec<PendingFreesLogEntry>)> =
                 Vec::new();
             let mut new_size: u32 = 0;
-            assert!(object_sizes.contains_key(&object));
+            assert!(object_sizes.contains(&object));
             let mut first = true;
-            for (later_obj, later_size) in object_sizes.range((Included(object), Unbounded)) {
-                let later_bytes_freed: u32 = frees_per_object
-                    .get(later_obj)
-                    .unwrap_or(&Vec::new())
-                    .iter()
-                    .map(|e| e.size)
-                    .sum();
-                let later_new_size = later_size - later_bytes_freed;
+            for later_object_size in object_sizes.range((Included(object), Unbounded)) {
+                let later_object = later_object_size.object;
+                let empty_vec = Vec::new();
+                let later_object_frees = frees_per_object.get(&later_object).unwrap_or(&empty_vec);
+                let later_bytes_freed: u32 = later_object_frees.iter().map(|e| e.size).sum();
+                let later_blocks_freed = later_object_frees.len() as u32;
+                let later_object_new_size = ObjectSize {
+                    object: later_object,
+                    num_blocks: later_object_size.num_blocks - later_blocks_freed,
+                    num_bytes: later_object_size.num_bytes - later_bytes_freed,
+                };
                 if first {
-                    assert_eq!(object, *later_obj);
-                    assert!(!writing.contains(later_obj));
+                    assert_eq!(object, later_object);
+                    assert!(!writing.contains(&later_object));
                     first = false;
                 } else {
                     // If we run into an object that we're already writing, we
                     // can't consolidate with it.
-                    if writing.contains(later_obj) {
+                    if writing.contains(&later_object) {
                         break;
                     }
-                    if new_size + later_new_size > *MAX_BYTES_PER_OBJECT {
+                    if new_size + later_object_new_size.num_bytes > *MAX_BYTES_PER_OBJECT {
                         break;
                     }
                 }
-                new_size += later_new_size;
-                let frees = frees_per_object.remove(later_obj).unwrap_or_default();
-                freed_blocks_count += frees.len() as u64;
-                freed_blocks_bytes += later_bytes_freed as u64;
-                objects_to_consolidate.push((*later_obj, later_new_size, frees));
+                new_size += later_object_new_size.num_bytes;
+                let frees = frees_per_object.remove(&later_object).unwrap_or_default();
+                freed_blocks_count += u64::from(later_blocks_freed);
+                freed_blocks_bytes += u64::from(later_bytes_freed);
+                objects_to_consolidate.push((later_object_new_size, frees));
             }
             // XXX look for earlier objects too?
 
             // Must include at least the target object
-            assert_eq!(objects_to_consolidate[0].0, object);
+            assert_eq!(objects_to_consolidate[0].0.object, object);
 
             writing.insert(object);
 
             // all but the first object need to be deleted by syncing context
-            for (later_object, _, _) in objects_to_consolidate.iter().skip(1) {
+            for (later_object_size, _) in objects_to_consolidate.iter().skip(1) {
                 //complete.rewritten_object_sizes.push((*obj, 0));
-                deleted_objects.push(*later_object);
+                deleted_objects.push(later_object_size.object);
             }
             // Note: we could calculate the new object's size here as well,
             // but that would be based on the object_sizes map/log, which
@@ -1878,8 +1875,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
         }
         let num_handles = join_handles.len();
         for join_handle in join_handles {
-            let (object, size) = join_handle.await.unwrap();
-            rewritten_object_sizes.push((object, size));
+            rewritten_object_sizes.push(join_handle.await.unwrap());
         }
 
         info!(
@@ -1970,7 +1966,7 @@ async fn try_condense_object_log(state: Arc<PoolState>, syncing_state: &mut Pool
 
 async fn try_condense_object_sizes(
     syncing_state: &mut PoolSyncingState,
-    object_sizes: BTreeMap<ObjectId, u32>,
+    object_sizes: BTreeSet<ObjectSize>,
     remainder: ObjectBasedLogRemainder,
 ) {
     // XXX change this to be based on bytes, once those stats are working?
@@ -1999,17 +1995,10 @@ async fn try_condense_object_sizes(
         .iter_remainder(txg, remainder)
         .await;
     syncing_state.object_size_log.clear(txg).await;
-    {
-        for (object, num_bytes) in object_sizes.iter() {
-            syncing_state.object_size_log.append(
-                txg,
-                ObjectSizeLogEntry::Exists {
-                    object: *object,
-                    num_blocks: 0, // XXX need num blocks
-                    num_bytes: *num_bytes,
-                },
-            );
-        }
+    for object_size in object_sizes {
+        syncing_state
+            .object_size_log
+            .append(txg, ObjectSizeLogEntry::Exists(object_size));
     }
 
     stream
