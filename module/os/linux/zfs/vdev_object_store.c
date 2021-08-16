@@ -67,6 +67,7 @@
 #define	AGENT_CAUSE		"cause"
 #define	AGENT_HOSTNAME		"hostname"
 #define	AGENT_READONLY		"readonly"
+#define	AGENT_RESUME		"resume"
 
 /*
  * By default, the logical/physical ashift for object store vdevs is set to
@@ -503,7 +504,8 @@ agent_create_pool(vdev_t *vd, vdev_object_store_t *vos)
 }
 
 static uint64_t
-agent_open_pool(vdev_t *vd, vdev_object_store_t *vos, mode_t mode)
+agent_open_pool(vdev_t *vd, vdev_object_store_t *vos, mode_t mode,
+    boolean_t resume)
 {
 	/*
 	 * We need to ensure that we only issue a request when the
@@ -523,6 +525,7 @@ agent_open_pool(vdev_t *vd, vdev_object_store_t *vos, mode_t mode)
 	fnvlist_add_string(nv, AGENT_ENDPOINT, vos->vos_endpoint);
 	fnvlist_add_string(nv, AGENT_REGION, vos->vos_region);
 	fnvlist_add_string(nv, AGENT_BUCKET, vd->vdev_path);
+	fnvlist_add_boolean_value(nv, AGENT_RESUME, resume);
 	if (mode == O_RDONLY)
 		fnvlist_add_boolean(nv, AGENT_READONLY);
 	if (vd->vdev_spa->spa_load_max_txg != UINT64_MAX) {
@@ -674,7 +677,7 @@ agent_resume(void *arg)
 		agent_create_pool(vd, vos);
 	}
 	VERIFY0(agent_open_pool(vd, vos,
-	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa))));
+	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)), B_TRUE));
 
 	if ((ret = agent_resume_state_check(vd)) != 0) {
 		zfs_dbgmsg("agent resume failed, uberblock changed");
@@ -1262,7 +1265,7 @@ vdev_object_store_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 		agent_create_pool(vd, vos);
 	}
 	error = agent_open_pool(vd, vos,
-	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)));
+	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)), B_FALSE);
 	if (error != 0) {
 		ASSERT3U(vd->vdev_spa->spa_load_state, !=, SPA_LOAD_CREATE);
 		return (error);

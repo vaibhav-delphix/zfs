@@ -3,8 +3,8 @@ use crate::object_access::ObjectAccess;
 use crate::pool::PoolSharedState;
 use anyhow::{Context, Result};
 use async_stream::stream;
-use futures::future;
 use futures::future::join_all;
+use futures::future::{self, join};
 use futures::stream::{FuturesOrdered, StreamExt};
 use futures_core::Stream;
 use lazy_static::lazy_static;
@@ -146,34 +146,49 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
 
     /// Recover after a system crash, where the kernel also crashed and we are discarding
     /// any changes after the current txg.
-    pub async fn recover(&mut self) {
-        // XXX now that we are flushing async, there could be gaps in written
-        // but not needed chunkID's.  Probably want to change keys to use padded numbers so that
-        // we can easily find any after the last chunk.
-
-        // Delete any chunks past the logical end of the log
-        /*
-        for c in self.num_chunks.. {
-            let key = &format!("{}/{:020}/{:020}", self.name, self.generation, c);
-            if self.pool.object_access.object_exists(&key).await {
-                self.pool.object_access.delete_object(&key).await;
-            } else {
-                break;
+    pub async fn cleanup(&mut self) {
+        // collect chunks past the end, in the current generation
+        let shared_state = self.shared_state.clone();
+        let last_generation_key = format!("{}/{:020}/", self.name, self.generation);
+        let start_after = if self.num_chunks == 0 {
+            None
+        } else {
+            Some(ObjectBasedLogChunk::<T>::key(
+                &self.name,
+                self.generation,
+                self.num_chunks - 1,
+            ))
+        };
+        let current_generation_cleanup = async move {
+            let objects = shared_state
+                .object_access
+                .collect_objects(&last_generation_key, start_after)
+                .await;
+            for chunk in objects.chunks(900) {
+                info!(
+                    "cleanup: deleting future chunks of current generation: {:?}",
+                    chunk
+                );
+                shared_state.object_access.delete_objects(chunk).await;
             }
-        }
+        };
 
-        // Delete the partially-complete generation (if present)
-        for c in 0.. {
-            let key = &format!("{}/{:020}/{:020}", self.name, self.generation + 1, c);
-            if self.pool.object_access.object_exists(key).await {
-                self.pool.object_access.delete_object(key).await;
-            } else {
-                break;
+        // collect chunks from the partially-complete future generation
+        let shared_state = self.shared_state.clone();
+        let next_generation_key = format!("{}/{:020}/", self.name, self.generation + 1);
+        let next_generation_cleanup = async move {
+            let objects = shared_state
+                .object_access
+                .collect_objects(&next_generation_key, None)
+                .await;
+            for chunk in objects.chunks(900) {
+                info!("cleanup: deleting chunks of future generation: {:?}", chunk);
+                shared_state.object_access.delete_objects(chunk).await;
             }
-        }
-        */
+        };
 
-        // XXX verify that there are no chunks/generations past what we deleted
+        // execute both cleanup's concurrently
+        join(current_generation_cleanup, next_generation_cleanup).await;
 
         self.recovered = true;
     }

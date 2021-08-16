@@ -11,8 +11,10 @@ use crate::object_block_map::ObjectBlockMap;
 use crate::object_block_map::StorageObjectLogEntry;
 use anyhow::Error;
 use anyhow::{Context, Result};
-use core::future::Future;
 use futures::future;
+use futures::future::join3;
+use futures::future::Either;
+use futures::future::Future;
 use futures::stream::*;
 use lazy_static::lazy_static;
 use log::*;
@@ -514,6 +516,80 @@ impl PoolState {
         let mut guard = self.syncing_state.lock().unwrap();
         f(guard.as_mut().unwrap())
     }
+
+    async fn cleanup_uberblock_objects(&self, last_txg: Txg) {
+        let shared_state = &self.shared_state;
+        let txg_key = format!("zfs/{}/txg/", shared_state.guid);
+        let start_after = Some(UberblockPhys::key(shared_state.guid, last_txg));
+        let objects = shared_state
+            .object_access
+            .collect_objects(&txg_key, start_after)
+            .await;
+        for chunk in objects.chunks(900) {
+            info!("cleanup: deleting future uberblocks: {:?}", chunk);
+            shared_state.object_access.delete_objects(chunk).await;
+        }
+    }
+
+    /// Remove any log objects that are invalid (i.e. written as part of an
+    /// in-progress txg before the kernel or agent crashed)
+    async fn cleanup_log_objects(&self) {
+        let mut syncing_state = self.syncing_state.lock().unwrap().take().unwrap();
+
+        let begin = Instant::now();
+        let stream = FuturesUnordered::new();
+        for log in syncing_state.pending_frees_log.iter_mut() {
+            stream.push(log.cleanup());
+        }
+        join3(
+            syncing_state.storage_object_log.cleanup(),
+            syncing_state.object_size_log.cleanup(),
+            stream.for_each(|_| future::ready(())),
+        )
+        .await;
+        assert!(self.syncing_state.lock().unwrap().is_none());
+        *self.syncing_state.lock().unwrap() = Some(syncing_state);
+
+        info!(
+            "cleanup: found and deleted log objects in {}ms",
+            begin.elapsed().as_millis()
+        );
+    }
+
+    /// Remove any data objects that are invalid (i.e. written as part of an
+    /// in-progress txg before the kernel crashed)
+    async fn cleanup_data_objects(&self) {
+        let shared_state = self.shared_state.clone();
+
+        let begin = Instant::now();
+        let last_obj = self.object_block_map.last_object();
+        let list_stream = FuturesUnordered::new();
+        for prefix in DataObjectPhys::prefixes(shared_state.guid) {
+            let shared_state = shared_state.clone();
+            list_stream.push(async move {
+                shared_state
+                    .object_access
+                    .collect_objects(&prefix, Some(format!("{}{}", prefix, last_obj)))
+                    .await
+            });
+        }
+
+        let objects = list_stream
+            .fold(Vec::new(), |mut vec, mut x| async move {
+                vec.append(&mut x);
+                vec
+            })
+            .await;
+        for chunk in objects.chunks(900) {
+            shared_state.object_access.delete_objects(chunk).await;
+        }
+
+        info!(
+            "cleanup: found and deleted {} data objects in {}ms",
+            objects.len(),
+            begin.elapsed().as_millis()
+        );
+    }
 }
 
 impl Pool {
@@ -588,9 +664,9 @@ impl Pool {
                     pending_unordered_writes: HashMap::new(),
                     stats: phys.stats,
                     reclaim_done: None,
-                    rewriting_objects: HashMap::new(),
-                    objects_to_delete: Vec::new(),
-                    pending_flushes: BTreeSet::new(),
+                    rewriting_objects: Default::default(),
+                    objects_to_delete: Default::default(),
+                    pending_flushes: Default::default(),
                 })),
                 zettacache: cache,
                 object_block_map,
@@ -598,17 +674,10 @@ impl Pool {
             }),
         };
 
-        let mut syncing_state = {
+        let syncing_state = {
             let mut guard = pool.state.syncing_state.lock().unwrap();
             guard.take().unwrap()
         };
-
-        syncing_state.storage_object_log.recover().await;
-        syncing_state.object_size_log.recover().await;
-        for log in syncing_state.pending_frees_log.iter_mut() {
-            // XXX can these be done in parallel?
-            log.recover().await;
-        }
 
         assert_eq!(
             pool.state.object_block_map.len() as u64,
@@ -629,6 +698,7 @@ impl Pool {
         txg: Option<Txg>,
         cache: Option<ZettaCache>,
         id: Uuid,
+        resume: bool,
     ) -> Result<(Pool, Option<UberblockPhys>, BlockId), PoolOpenError> {
         let phys = PoolPhys::get(object_access, guid).await?;
         if phys.last_txg.0 == 0 {
@@ -701,7 +771,28 @@ impl Pool {
             )
             .await;
 
-            pool.claim(id).await.map(|_| (pool, ub, next_block))
+            pool.claim(id).await?;
+
+            if !object_access.readonly() {
+                let last_txg = pool
+                    .state
+                    .with_syncing_state(|syncing_state| syncing_state.last_txg);
+                let state = pool.state.clone();
+                // Note: cleanup_log_objects() takes the syncing_state, so the
+                // other concurrently-executed cleanups can not access the
+                // syncing state.  That's why we need to pass in the last_txg.
+                join3(
+                    pool.state.clone().cleanup_log_objects(),
+                    pool.state.clone().cleanup_uberblock_objects(last_txg),
+                    if resume {
+                        Either::Left(future::ready(()))
+                    } else {
+                        Either::Right(state.cleanup_data_objects())
+                    },
+                )
+                .await;
+            }
+            Ok((pool, ub, next_block))
         }
     }
 
@@ -875,12 +966,14 @@ impl Pool {
                 txg,
             );
 
-            debug!("resume: moving last writes to pending_object");
+            debug!("resume: moving last writes to pending_object and flushing");
             Self::write_unordered_to_pending_object(
                 state,
                 syncing_state,
                 Some(*MAX_BYTES_PER_OBJECT),
             );
+            Self::initiate_flush_object_impl(state, syncing_state);
+
             info!("resume: completed");
         })
     }
@@ -905,10 +998,7 @@ impl Pool {
     pub async fn end_txg(&self, uberblock: Vec<u8>, config: Vec<u8>) -> PoolStatsPhys {
         let state = &self.state;
 
-        let mut syncing_state = {
-            let mut guard = state.syncing_state.lock().unwrap();
-            guard.take().unwrap()
-        };
+        let mut syncing_state = state.syncing_state.lock().unwrap().take().unwrap();
 
         // should have already been flushed; no pending writes
         assert!(syncing_state.pending_unordered_writes.is_empty());
