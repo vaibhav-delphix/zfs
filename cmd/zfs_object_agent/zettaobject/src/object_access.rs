@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_stream::stream;
 use bytes::Bytes;
 use core::time::Duration;
-use futures::{future::Either, Future, StreamExt};
+use futures::future::Either;
+use futures::{future, Future, TryStreamExt};
 use http::StatusCode;
 use lazy_static::lazy_static;
 use log::*;
@@ -43,6 +44,8 @@ lazy_static! {
     ];
     // log operations that take longer than this with info!()
     static ref LONG_OPERATION_DURATION: Duration = Duration::from_secs(get_tunable("long_operation_secs", 2));
+
+    static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
 }
 
 #[derive(Clone)]
@@ -70,47 +73,50 @@ pub fn prefixed(key: &str) -> String {
 
 #[derive(Debug)]
 #[allow(clippy::upper_case_acronyms)]
-pub enum OAError<E>
-where
-    E: core::fmt::Debug + core::fmt::Display + std::error::Error,
-{
+pub enum OAError<E> {
     TimeoutError(Elapsed),
     RequestError(RusotoError<E>),
+    Other(anyhow::Error),
 }
 
 impl<E> Display for OAError<E>
 where
-    E: core::fmt::Debug + core::fmt::Display + std::error::Error + 'static,
+    E: std::error::Error + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OAError::TimeoutError(e) => e.fmt(f),
             OAError::RequestError(e) => e.fmt(f),
+            OAError::Other(e) => e.fmt(f),
         }
     }
 }
 
-impl<E> Error for OAError<E> where
-    E: core::fmt::Debug + core::fmt::Display + std::error::Error + 'static
-{
+impl<E> Error for OAError<E> where E: std::error::Error + 'static {}
+
+impl<E> From<RusotoError<E>> for OAError<E> {
+    fn from(e: RusotoError<E>) -> Self {
+        Self::RequestError(e)
+    }
 }
 
-async fn retry_impl<F, O, E>(msg: &str, f: impl Fn() -> F) -> Result<O, RusotoError<E>>
+async fn retry_impl<F, O, E>(msg: &str, f: impl Fn() -> F) -> Result<O, OAError<E>>
 where
-    E: std::error::Error,
-    F: Future<Output = (bool, Result<O, RusotoError<E>>)>,
+    E: core::fmt::Debug,
+    F: Future<Output = Result<O, OAError<E>>>,
 {
     let mut delay = Duration::from_secs_f64(thread_rng().gen_range(0.001..0.2));
     loop {
         match f().await {
-            (true, res @ Err(RusotoError::Service(_))) => return res,
-            (true, res @ Err(RusotoError::Credentials(_))) => return res,
-            (true, Err(RusotoError::Unknown(bhr))) => {
+            res @ Ok(_) => return res,
+            res @ Err(OAError::RequestError(RusotoError::Service(_))) => return res,
+            res @ Err(OAError::RequestError(RusotoError::Credentials(_))) => return res,
+            Err(OAError::RequestError(RusotoError::Unknown(bhr))) => {
                 if NON_RETRYABLE_ERRORS.contains(&bhr.status) {
-                    return Err(RusotoError::Unknown(bhr));
+                    return Err(OAError::RequestError(RusotoError::Unknown(bhr)));
                 }
             }
-            (true, Err(e)) => {
+            Err(e) => {
                 debug!(
                     "{} returned: {:?}; retrying in {}ms",
                     msg,
@@ -124,9 +130,6 @@ where
                     );
                 }
             }
-            (_, res) => {
-                return res;
-            }
         }
         tokio::time::sleep(delay).await;
         delay = delay.mul_f64(thread_rng().gen_range(1.5..2.5));
@@ -139,17 +142,17 @@ async fn retry<F, O, E>(
     f: impl Fn() -> F,
 ) -> Result<O, OAError<E>>
 where
-    E: core::fmt::Debug + core::fmt::Display + std::error::Error,
-    F: Future<Output = (bool, Result<O, RusotoError<E>>)>,
+    E: core::fmt::Debug,
+    F: Future<Output = Result<O, OAError<E>>>,
 {
     debug!("{}: begin", msg);
     let begin = Instant::now();
     let result = match timeout_opt {
         Some(timeout) => match tokio::time::timeout(timeout, retry_impl(msg, f)).await {
             Err(e) => Err(OAError::TimeoutError(e)),
-            Ok(res2) => res2.map_err(OAError::RequestError),
+            Ok(res2) => res2,
         },
-        None => retry_impl(msg, f).await.map_err(OAError::RequestError),
+        None => retry_impl(msg, f).await,
     };
     let elapsed = begin.elapsed();
     debug!("{}: returned in {}ms", msg, elapsed.as_millis());
@@ -246,40 +249,41 @@ impl ObjectAccess {
 
     pub async fn get_object_impl(&self, key: &str, timeout: Option<Duration>) -> Result<Vec<u8>> {
         let msg = format!("get {}", prefixed(key));
-        let output = retry(&msg, timeout, || async {
+        let v = retry(&msg, timeout, || async {
             let req = GetObjectRequest {
                 bucket: self.bucket_str.clone(),
                 key: prefixed(key),
                 ..Default::default()
             };
-            let res = self.client.get_object(req).await;
-            match res {
-                Err(RusotoError::Service(GetObjectError::NoSuchKey(_))) => (false, res),
-                _ => (true, res),
+            let output = self.client.get_object(req).await?;
+            let begin = Instant::now();
+            let mut v = Vec::with_capacity(output.content_length.unwrap_or(0) as usize);
+            match output
+                .body
+                .unwrap()
+                .try_for_each(|b| {
+                    v.extend_from_slice(&b);
+                    future::ready(Ok(()))
+                })
+                .await
+            {
+                Err(e) => {
+                    debug!("{}: error while reading ByteStream: {}", msg, e);
+                    Err(OAError::RequestError(e.into()))
+                }
+                Ok(_) => {
+                    debug!(
+                        "{}: got {} bytes of data in {}ms",
+                        msg,
+                        v.len(),
+                        begin.elapsed().as_millis()
+                    );
+                    Ok(v)
+                }
             }
         })
         .await
         .with_context(|| format!("Failed to {}", msg))?;
-        let begin = Instant::now();
-        let mut v = match output.content_length {
-            None => Vec::new(),
-            Some(len) => Vec::with_capacity(len as usize),
-        };
-        output
-            .body
-            .unwrap() // XXX could the connection die while we're reading the bytestream?
-            .for_each(|x| {
-                let b = x.unwrap();
-                v.extend_from_slice(&b);
-                async {}
-            })
-            .await;
-        debug!(
-            "{}: got {} bytes of data in additional {}ms",
-            msg,
-            v.len(),
-            begin.elapsed().as_millis()
-        );
 
         Ok(v)
     }
@@ -371,7 +375,8 @@ impl ObjectAccess {
                         start_after: full_start_after.clone(),
                         ..Default::default()
                     };
-                    (true, self.client.list_objects_v2(req).await)
+                    // Note: Ok(...?) converts the RusotoError to an OAError for us
+                    Ok(self.client.list_objects_v2(req).await?)
                 },
             )
             .await
@@ -435,7 +440,8 @@ impl ObjectAccess {
                 key: prefixed(key),
                 ..Default::default()
             };
-            (true, self.client.head_object(req).await)
+            // Note: Ok(...?) converts the RusotoError to an OAError for us
+            Ok(self.client.head_object(req).await?)
         })
         .await;
         res.ok()
@@ -467,7 +473,8 @@ impl ObjectAccess {
                     body: Some(stream),
                     ..Default::default()
                 };
-                (true, self.client.put_object(req).await)
+                // Note: Ok(...?) converts the RusotoError to an OAError for us
+                Ok(self.client.put_object(req).await?)
             },
         )
         .await
@@ -507,55 +514,42 @@ impl ObjectAccess {
         self.delete_objects(&[key.to_string()]).await;
     }
 
-    // return if retry needed
-    // XXX unfortunate that this level of retry can't be handled by retry()
-    // XXX ideally we would only retry the failed deletions, not all of them
-    async fn delete_objects_impl(&self, keys: &[String]) -> bool {
-        let msg = format!(
-            "delete {} objects including {}",
-            keys.len(),
-            prefixed(&keys[0])
-        );
-        assert!(!self.readonly);
-        let output = retry(&msg, None, || async {
-            let v: Vec<_> = keys
-                .iter()
-                .map(|x| ObjectIdentifier {
-                    key: prefixed(x),
-                    ..Default::default()
-                })
-                .collect();
-            let req = DeleteObjectsRequest {
-                bucket: self.bucket_str.clone(),
-                delete: Delete {
-                    objects: v,
-                    quiet: Some(true),
-                },
-                ..Default::default()
-            };
-            (true, self.client.delete_objects(req).await)
-        })
-        .await
-        .unwrap();
-        if let Some(errs) = output.errors {
-            if !errs.is_empty() {}
-            for err in errs {
-                debug!("delete: error from s3; retrying in 100ms: {:?}", err);
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            true
-        } else {
-            false
-        }
-    }
-
-    // XXX just have it take ObjectIdentifiers? but they would need to be
-    // prefixed already, to avoid creating new ObjectIdentifiers
-    // Note: AWS supports up to 1000 keys per delete_objects request.
-    // XXX should we split them up here?
     pub async fn delete_objects(&self, keys: &[String]) {
-        while self.delete_objects_impl(keys).await {}
+        for chunk in keys.chunks(*OBJECT_DELETION_BATCH_SIZE) {
+            let msg = format!(
+                "delete {} objects including {}",
+                chunk.len(),
+                prefixed(&chunk[0])
+            );
+            assert!(!self.readonly);
+            retry(&msg, None, || async {
+                let v: Vec<_> = chunk
+                    .iter()
+                    .map(|x| ObjectIdentifier {
+                        key: prefixed(x),
+                        ..Default::default()
+                    })
+                    .collect();
+                let req = DeleteObjectsRequest {
+                    bucket: self.bucket_str.clone(),
+                    delete: Delete {
+                        objects: v,
+                        quiet: Some(true),
+                    },
+                    ..Default::default()
+                };
+                let output = self.client.delete_objects(req).await?;
+                if let Some(errs) = output.errors {
+                    match errs.get(0) {
+                        Some(e) => return Err(OAError::Other(anyhow!("{:?}", e))),
+                        None => return Ok(()),
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
     }
 
     pub fn bucket(&self) -> String {

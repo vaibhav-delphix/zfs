@@ -1083,17 +1083,15 @@ impl Pool {
         tokio::spawn(async move {
             let begin = Instant::now();
             let len = objects_to_delete.len();
-            for objects in objects_to_delete.chunks(900) {
-                shared_state
-                    .object_access
-                    .delete_objects(
-                        &objects
-                            .iter()
-                            .map(|o| DataObjectPhys::key(shared_state.guid, *o))
-                            .collect::<Vec<_>>(),
-                    )
-                    .await;
-            }
+            shared_state
+                .object_access
+                .delete_objects(
+                    &objects_to_delete
+                        .iter()
+                        .map(|o| DataObjectPhys::key(shared_state.guid, *o))
+                        .collect::<Vec<_>>(),
+                )
+                .await;
             if len != 0 {
                 info!(
                     "reclaim: deleted {} objects in {}ms",

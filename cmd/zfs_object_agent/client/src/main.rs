@@ -36,7 +36,6 @@ const REGION: &str = "us-west-2";
 const BUCKET_NAME: &str = "cloudburst-data-2";
 const POOL_NAME: &str = "testpool";
 const POOL_GUID: u64 = 1234;
-const AWS_DELETION_BATCH_SIZE: usize = 1000;
 
 lazy_static! {
     static ref AWS_PREFIX: String = match env::var("AWS_PREFIX") {
@@ -433,20 +432,15 @@ async fn do_destroy_old_pools(
     min_age: Duration,
 ) -> Result<(), Box<dyn Error>> {
     for pool_keys in find_old_pools(object_access, min_age).await {
-        for chunk in object_access
-            .collect_all_objects(&pool_keys)
-            .await
-            .chunks(AWS_DELETION_BATCH_SIZE)
-        {
-            object_access
-                .delete_objects(
-                    &chunk
-                        .iter()
-                        .map(|o| strip_prefix(o).to_string())
-                        .collect::<Vec<_>>(),
-                )
-                .await;
-        }
+        let object_keys = object_access.collect_all_objects(&pool_keys).await;
+        object_access
+            .delete_objects(
+                &object_keys
+                    .iter()
+                    .map(|o| strip_prefix(o).to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .await;
     }
     Ok(())
 }
