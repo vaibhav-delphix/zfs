@@ -7,12 +7,19 @@ use crate::server::SerialHandlerReturn;
 use crate::server::Server;
 use anyhow::anyhow;
 use anyhow::Result;
+use lazy_static::lazy_static;
 use log::*;
 use nvpair::{NvData, NvList, NvListRef};
 use std::sync::Arc;
 use uuid::Uuid;
 use zettacache::base_types::*;
+use zettacache::get_tunable;
 use zettacache::ZettaCache;
+
+lazy_static! {
+    pub static ref DIE_BEFORE_END_TXG_RESPONSE_PCT: f64 =
+        get_tunable("die_before_end_txg_response_pct", 0.0);
+}
 
 pub struct KernelServerState {
     cache: Option<ZettaCache>,
@@ -204,6 +211,10 @@ impl KernelConnectionState {
         nvl.insert("pending_frees_bytes", &stats.pending_frees_bytes)
             .unwrap();
         nvl.insert("objects_count", &stats.objects_count).unwrap();
+        if rand::random::<f64>() * 100.0 < *DIE_BEFORE_END_TXG_RESPONSE_PCT {
+            warn!("test: exiting before sending response: {:?}", nvl);
+            panic!("test: exiting before sending response: {:?}", nvl);
+        }
         debug!("sending response: {:?}", nvl);
         Ok(Some(nvl))
     }

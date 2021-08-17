@@ -95,6 +95,7 @@ typedef enum {
 typedef enum {
 	VOS_TXG_BEGIN = 0,
 	VOS_TXG_END,
+	VOS_TXG_END_AGAIN,
 	VOS_TXG_NONE
 } vos_serial_flag_t;
 
@@ -642,10 +643,14 @@ agent_resume_state_check(vdev_t *vd)
 		/*
 		 * In this case, it's possible that the uberblock was written
 		 * out before we got the end txg done message. We can safely
-		 * continue.
+		 * continue by sending the "end txg" command again, without
+		 * doing "resume txg".
 		 */
 		if (bcmp(&vd->vdev_spa->spa_uberblock, &vos->vos_uberblock,
 		    sizeof (uberblock_t)) == 0) {
+			zfs_dbgmsg("resume: uberblock matches spa_uberblock; "
+			    "calling TXG_END again");
+			vos->vos_send_txg_selector = VOS_TXG_END_AGAIN;
 			return (0);
 		}
 	}
@@ -730,7 +735,8 @@ agent_resume(void *arg)
 		agent_resume_complete(vos);
 	}
 
-	if (vos->vos_send_txg_selector == VOS_TXG_END) {
+	if (vos->vos_send_txg_selector == VOS_TXG_END ||
+	    vos->vos_send_txg_selector == VOS_TXG_END_AGAIN) {
 		size_t nvlen;
 		char *nvbuf = fnvlist_pack(vos->vos_config, &nvlen);
 		agent_end_txg(vos, spa_syncing_txg(spa),

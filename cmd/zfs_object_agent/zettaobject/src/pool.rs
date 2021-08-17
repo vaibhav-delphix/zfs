@@ -803,7 +803,7 @@ impl Pool {
         // XXX change this to return an error to the client
         self.state.with_syncing_state(|syncing_state| {
             assert!(syncing_state.syncing_txg.is_none());
-            assert_gt!(txg.0, syncing_state.last_txg.0);
+            assert_gt!(txg, syncing_state.last_txg);
             syncing_state.syncing_txg = Some(txg);
 
             // Resuming state is indicated by pending_object = NotPending
@@ -1004,6 +1004,33 @@ impl Pool {
         let state = &self.state;
 
         let mut syncing_state = state.syncing_state.lock().unwrap().take().unwrap();
+
+        if syncing_state.syncing_txg.is_none() {
+            // Note: if we died after writing the super object but before the
+            // kernel got the "end txg done" response, it will resume the last
+            // completed txg.  In this case we're syncing the last txg again.
+            // This should be a no-op.
+            let phys = UberblockPhys::get(
+                &state.shared_state.object_access,
+                state.shared_state.guid,
+                syncing_state.last_txg,
+            )
+            .await
+            .unwrap();
+            assert_eq!(phys.zfs_uberblock.0, uberblock);
+            assert_eq!(phys.zfs_config.0, config);
+
+            assert!(!syncing_state.pending_object.is_pending());
+            assert!(syncing_state.pending_unordered_writes.is_empty());
+
+            let stats = syncing_state.stats;
+
+            // put syncing_state back in the Option
+            assert!(state.syncing_state.lock().unwrap().is_none());
+            *state.syncing_state.lock().unwrap() = Some(syncing_state);
+
+            return stats;
+        }
 
         // should have already been flushed; no pending writes
         assert!(syncing_state.pending_unordered_writes.is_empty());
