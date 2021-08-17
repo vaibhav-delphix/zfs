@@ -38,6 +38,7 @@ use tokio::time::sleep;
 use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::get_tunable;
+use zettacache::LookupResponse;
 use zettacache::ZettaCache;
 
 lazy_static! {
@@ -1375,11 +1376,13 @@ impl Pool {
 
     pub async fn read_block(&self, block: BlockId) -> Vec<u8> {
         // check in ZettaCache
-        if let Some(cache) = &self.state.zettacache {
-            if let Some(v) = cache.lookup(self.state.shared_state.guid, block).await {
-                return v;
-            }
-        }
+        let key = match &self.state.zettacache {
+            Some(cache) => match cache.lookup(self.state.shared_state.guid, block).await {
+                LookupResponse::Present(v) => return v,
+                LookupResponse::Absent(l) => Some(l),
+            },
+            None => None,
+        };
 
         let object = self.state.object_block_map.block_to_object(block);
         let shared_state = self.state.shared_state.clone();
@@ -1398,10 +1401,13 @@ impl Pool {
         let v = phys.blocks.get(&block).unwrap().to_owned().into_vec();
 
         // add to ZettaCache
-        if let Some(cache) = &self.state.zettacache {
+        if let Some(key) = key {
             // XXX clone() copies the data; would be nice to pass a reference
-            cache
-                .insert(self.state.shared_state.guid, block, v.clone())
+            self.state
+                .zettacache
+                .as_ref()
+                .unwrap()
+                .insert(key, v.clone())
                 .await;
         }
 

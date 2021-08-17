@@ -7,6 +7,8 @@ use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorPhys;
 use crate::get_tunable;
 use crate::index::*;
+use crate::lock_set::LockSet;
+use crate::lock_set::LockedItem;
 use anyhow::Result;
 use futures::future;
 use futures::stream::*;
@@ -111,6 +113,7 @@ pub struct ZettaCache {
     index: Arc<tokio::sync::RwLock<ZettaCacheIndex>>,
     // XXX may need to break up this big lock.  At least we aren't holding it while doing i/o
     state: Arc<tokio::sync::Mutex<ZettaCacheState>>,
+    outstanding_lookups: LockSet<IndexKey>,
     metrics: Arc<ZettaCacheMetrics>,
 }
 
@@ -234,9 +237,18 @@ struct ZettaCacheState {
     // from the tree.  These are needed to prevent the ExtentAllocator from
     // overwriting them while i/o is in flight, and to ensure that writes
     // complete before we complete the next checkpoint.
+    // XXX I don't think we do lookups here so these could be Vec's?
     outstanding_reads: BTreeMap<IndexValue, Arc<Semaphore>>,
     outstanding_writes: BTreeMap<IndexValue, Arc<Semaphore>>,
+
     atime: Atime,
+}
+
+pub struct LockedKey(LockedItem<IndexKey>);
+
+pub enum LookupResponse {
+    Present(Vec<u8>),
+    Absent(LockedKey),
 }
 
 #[metered(registry=ZettaCacheMetrics)]
@@ -345,8 +357,8 @@ impl ZettaCache {
             ),
             operation_log,
             super_phys: phys,
-            outstanding_reads: BTreeMap::new(),
-            outstanding_writes: BTreeMap::new(),
+            outstanding_reads: Default::default(),
+            outstanding_writes: Default::default(),
             atime: checkpoint.last_atime,
             block_allocator: BlockAllocator::open(
                 block_access.clone(),
@@ -360,6 +372,7 @@ impl ZettaCache {
         let this = ZettaCache {
             index: Arc::new(tokio::sync::RwLock::new(index)),
             state: Arc::new(tokio::sync::Mutex::new(state)),
+            outstanding_lookups: LockSet::new(),
             metrics: Default::default(),
         };
 
@@ -512,16 +525,18 @@ impl ZettaCache {
     #[measure(InFlight)]
     #[measure(Throughput)]
     #[measure(HitCount)]
-    pub async fn lookup(&self, guid: PoolGuid, block: BlockId) -> Option<Vec<u8>> {
+    pub async fn lookup(&self, guid: PoolGuid, block: BlockId) -> LookupResponse {
         // We want to hold the index lock over the whole operation so that the index can't change after we get the value from it.
         // Lock ordering requres that we lock the index before locking the state.
-        let index = self.index.read().await;
         let key = IndexKey { guid, block };
+        let locked_key = LockedKey(self.outstanding_lookups.lock(key).await);
+        let index = self.index.read().await;
         let read_data_fut_opt = {
             // We don't want to hold the state lock while reading from disk.  We
             // use lock_state_non_async() to ensure that we can't hold it across
             // .await.
             let mut state = self.lock_state_non_async().await;
+
             match state.pending_changes.get(&key).copied() {
                 Some(pc) => {
                     match pc {
@@ -546,11 +561,11 @@ impl ZettaCache {
             match read_data_fut.await {
                 Some(vec) => {
                     self.cache_hit_without_index_read(&key);
-                    return Some(vec);
+                    return LookupResponse::Present(vec);
                 }
                 None => {
                     self.cache_miss_without_index_read(&key);
-                    return None;
+                    return LookupResponse::Absent(locked_key);
                 }
             }
         }
@@ -561,7 +576,7 @@ impl ZettaCache {
             None => {
                 // key not in index
                 self.cache_miss_after_index_read(&key);
-                None
+                LookupResponse::Absent(locked_key)
             }
             Some(entry) => {
                 // read data from location indicated by index
@@ -576,11 +591,11 @@ impl ZettaCache {
                 match read_data_fut.await {
                     Some(vec) => {
                         self.cache_hit_after_index_read(&key);
-                        Some(vec)
+                        LookupResponse::Present(vec)
                     }
                     None => {
                         self.cache_miss_after_index_read(&key);
-                        None
+                        LookupResponse::Absent(locked_key)
                     }
                 }
             }
@@ -591,9 +606,10 @@ impl ZettaCache {
     #[measure(InFlight)]
     #[measure(Throughput)]
     #[measure(HitCount)]
-    pub async fn insert(&self, guid: PoolGuid, block: BlockId, buf: Vec<u8>) {
+    pub async fn insert(&self, locked_key: LockedKey, buf: Vec<u8>) {
         let mut state = self.state.lock().await;
-        state.insert(guid, block, buf);
+        let index_key = locked_key.0.value();
+        state.insert(index_key.guid, index_key.block, buf);
     }
 }
 

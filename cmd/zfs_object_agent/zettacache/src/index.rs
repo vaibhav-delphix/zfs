@@ -6,7 +6,7 @@ use crate::zettacache::AtimeHistogramPhys;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct IndexKey {
     pub guid: PoolGuid,
     pub block: BlockId,
