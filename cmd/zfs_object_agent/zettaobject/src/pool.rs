@@ -900,8 +900,12 @@ impl Pool {
 
                         // XXX Unless there is already an object at object.next(), we
                         // should limit the object size as normal.
-                        // XXX we need to limit the unordered writes to be only those before the next object
-                        Self::write_unordered_to_pending_object(state, syncing_state, None);
+                        Self::write_unordered_to_pending_object(
+                            state,
+                            syncing_state,
+                            None,
+                            Some(next_recovered_object.min_block),
+                        );
 
                         let (phys, _) = syncing_state.pending_object.as_mut_pending();
                         debug!(
@@ -932,7 +936,7 @@ impl Pool {
                         // The kernel may not have known that this was already
                         // written (e.g. we didn't quite get to sending the "write
                         // done" response), so it sent us the write again.  In this
-                        // case we will not create a object, since the blocks are
+                        // case we will not create an object, since the blocks are
                         // already persistent, so we need to notify the waiter now.
                         while let Some(obsolete_write) =
                             peekable_next_if(&mut ordered_writes_iter, |b| {
@@ -971,6 +975,7 @@ impl Pool {
                 state,
                 syncing_state,
                 Some(*MAX_BYTES_PER_OBJECT),
+                None,
             );
             Self::initiate_flush_object_impl(state, syncing_state);
 
@@ -1277,6 +1282,7 @@ impl Pool {
         state: &PoolState,
         syncing_state: &mut PoolSyncingState,
         size_limit_opt: Option<u32>,
+        block_limit_opt: Option<BlockId>,
     ) {
         // If we're in the middle of resuming, we aren't building the pending object, so skip this
         if !syncing_state.pending_object.is_pending() {
@@ -1298,6 +1304,11 @@ impl Pool {
             if let Some(size_limit) = size_limit_opt {
                 if phys.blocks_size >= size_limit {
                     Self::initiate_flush_object_impl(state, syncing_state);
+                }
+            }
+            if let Some(block_limit) = block_limit_opt {
+                if next_block == block_limit {
+                    break;
                 }
             }
         }
@@ -1325,6 +1336,7 @@ impl Pool {
                     &self.state,
                     syncing_state,
                     Some(*MAX_BYTES_PER_OBJECT),
+                    None,
                 );
                 receiver
             }
